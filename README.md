@@ -80,6 +80,17 @@ docker run -d --net=host \
 
 > **重要**：必须使用 `--net=host` 网络模式，否则无法扫描局域网设备。
 
+#### 自定义端口
+
+```bash
+docker run -d --net=host \
+  -e BMUIPASS=登录密码 \
+  -e SERVER_PORT=9000 \
+  -v ./data:/opt/board-manager/data \
+  --name lvyou-smsweb \
+  lovexme/lvyou-smsweb:latest
+```
+
 #### Docker Compose 示例
 
 ```yaml
@@ -92,6 +103,7 @@ services:
     environment:
       - BMUIUSER=admin
       - BMUIPASS=your_password
+      - SERVER_PORT=9000
     volumes:
       - ./data:/opt/board-manager/data
 ```
@@ -100,6 +112,7 @@ services:
 
 | 变量 | 默认值 | 说明 |
 |------|--------|------|
+| `SERVER_PORT` | 8000 | 服务端口 |
 | `BMUIUSER` | admin | UI 登录用户名 |
 | `BMUIPASS` | admin | UI 登录密码 |
 | `BMDEVUSER` | admin | 设备扫描用户名 |

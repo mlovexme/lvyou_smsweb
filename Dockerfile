@@ -11,6 +11,13 @@
 #     -v ./data:/opt/board-manager/data \
 #     lovexme/lvyou-smsweb:latest
 #
+# 自定义端口：
+#   docker run -d --net=host \
+#     -e BMUIPASS=your_password \
+#     -e SERVER_PORT=9000 \
+#     -v ./data:/opt/board-manager/data \
+#     lovexme/lvyou-smsweb:latest
+#
 # Docker Compose 示例：
 #   services:
 #     lvyou-smsweb:
@@ -18,15 +25,17 @@
 #       network_mode: host
 #       environment:
 #         - BMUIPASS=your_password
+#         - SERVER_PORT=9000
 #       volumes:
 #         - ./data:/opt/board-manager/data
 #
 # 环境变量说明：
-#   BMUIUSER      - UI 登录用户名 (默认: admin)
-#   BMUIPASS      - UI 登录密码 (默认: admin)
-#   BMDEVUSER     - 设备扫描用户名 (默认: admin)
-#   BMDEVPASS     - 设备扫描密码 (默认: admin)
-#   BMHTTPTIMEOUT - HTTP 超时秒数 (默认: 5.0)
+#   SERVER_PORT     - 服务端口 (默认: 8000)
+#   BMUIUSER        - UI 登录用户名 (默认: admin)
+#   BMUIPASS        - UI 登录密码 (默认: admin)
+#   BMDEVUSER       - 设备扫描用户名 (默认: admin)
+#   BMDEVPASS       - 设备扫描密码 (默认: admin)
+#   BMHTTPTIMEOUT   - HTTP 超时秒数 (默认: 5.0)
 #   BMSCANCONCURRENCY - 扫描并发数 (默认: 32)
 # ========================================
 
@@ -84,13 +93,14 @@ ENV BMUIUSER=admin
 ENV BMUIPASS=admin
 ENV BMHTTPTIMEOUT=5.0
 ENV BMSCANCONCURRENCY=32
+ENV SERVER_PORT=8000
 
 # 暴露端口
 EXPOSE 8000
 
 # 健康检查
 HEALTHCHECK --interval=30s --timeout=10s --start-period=5s --retries=3 \
-    CMD curl -f http://localhost:8000/api/health || exit 1
+    CMD curl -f http://localhost:${SERVER_PORT}/api/health || exit 1
 
-# 启动命令
-CMD ["python", "-m", "uvicorn", "backend.main:app", "--host", "0.0.0.0", "--port", "8000"]
+# 启动命令（支持自定义端口）
+CMD ["sh", "-c", "python -m uvicorn backend.main:app --host 0.0.0.0 --port ${SERVER_PORT}"]
