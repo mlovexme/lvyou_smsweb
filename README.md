@@ -1,166 +1,152 @@
-```md
-# 安装与卸载说明
+# 绿邮X系列内网群控系统
 
-本项目当前推荐在 **Ubuntu / Debian** 系统上安装。  
-为避免脚本执行权限问题，**请统一使用 `bash` 执行脚本**，不要直接用 `./install.sh`。
+一个用于管理局域网内智能设备（如短信转发设备）的 Web 管理平台，支持设备扫描、短信发送、电话拨号、批量配置等功能。
 
----
+## 功能特性
 
-## 一、安装前准备
+- **设备管理**：自动扫描局域网设备，支持别名、分组管理
+- **短信发送**：通过设备 SIM 卡发送短信
+- **电话拨号**：支持 TTS 语音播报
+- **批量配置**：WiFi、SIM 卡号、消息转发等
+- **多种推送**：支持 Bark、SMTP、企业微信、钉钉、飞书、Server酱、PushPlus、WxPusher 等
 
-进入项目目录：
+## 安装方式
 
-```bash
-cd /root/lvyousms-web
-```
+### 方式一：脚本安装（推荐）
 
-推荐使用 root 用户，或具备 sudo 权限的用户执行。
-
----
-
-## 二、安装
-
-执行安装命令：
+适用于 Ubuntu / Debian 系统。
 
 ```bash
+# 下载项目
+git clone https://github.com/lovexme/lvyou_smsweb.git
+cd lvyou_smsweb
+
+# 执行安装
 sudo bash install.sh install
 ```
 
-安装过程中会提示你输入或确认以下内容：
+安装过程中会提示输入：
+- 服务端口（默认 8000）
+- UI 登录密码（至少 6 位）
 
-- 服务端口
-- 是否保留旧的 UI 密码
-- 其他必要配置项
+安装完成后访问：`http://服务器IP:8000/`
 
-按提示操作即可。
+#### 脚本命令说明
 
----
+```bash
+# 安装
+sudo bash install.sh install
 
-## 三、安装后检查
+# 查看状态
+sudo bash install.sh status
 
-安装完成后，建议检查服务状态：
+# 重启服务
+sudo bash install.sh restart
+
+# 查看日志
+sudo bash install.sh logs
+```
+
+#### 安装参数
+
+```bash
+sudo bash install.sh install \
+  --port 8000 \
+  --scan-user admin \
+  --scan-pass admin \
+  --ui-pass 123456
+```
+
+| 参数 | 说明 |
+|------|------|
+| `--port` | 服务端口，默认 8000 |
+| `--scan-user` | 设备扫描用户名，默认 admin |
+| `--scan-pass` | 设备扫描密码，默认 admin |
+| `--ui-pass` | UI 登录密码 |
+
+### 方式二：Docker 安装
+
+```bash
+# 拉取镜像
+docker pull lovexme/lvyou-smsweb:latest
+
+# 运行容器（必须使用 host 网络模式）
+docker run -d --net=host \
+  -e BMUIPASS=登录密码 \
+  -v ./data:/opt/board-manager/data \
+  --name lvyou-smsweb \
+  lovexme/lvyou-smsweb:latest
+```
+
+> **重要**：必须使用 `--net=host` 网络模式，否则无法扫描局域网设备。
+
+#### Docker Compose 示例
+
+```yaml
+services:
+  lvyou-smsweb:
+    image: lovexme/lvyou-smsweb:latest
+    container_name: lvyou-smsweb
+    restart: unless-stopped
+    network_mode: host
+    environment:
+      - BMUIUSER=admin
+      - BMUIPASS=your_password
+    volumes:
+      - ./data:/opt/board-manager/data
+```
+
+#### 环境变量说明
+
+| 变量 | 默认值 | 说明 |
+|------|--------|------|
+| `BMUIUSER` | admin | UI 登录用户名 |
+| `BMUIPASS` | admin | UI 登录密码 |
+| `BMDEVUSER` | admin | 设备扫描用户名 |
+| `BMDEVPASS` | admin | 设备扫描密码 |
+| `BMHTTPTIMEOUT` | 5.0 | HTTP 超时秒数 |
+| `BMSCANCONCURRENCY` | 32 | 扫描并发数 |
+
+## 卸载
+
+```bash
+cd lvyou_smsweb
+sudo bash uninstall.sh
+```
+
+## 常见问题
+
+### 出现 `{"detail":"UI not built"}`
+
+前端静态文件未正确部署，手动重新构建：
+
+```bash
+cd /root/lvyou_smsweb/frontend
+npm run build
+sudo mkdir -p /opt/board-manager/static
+sudo cp -a dist/. /opt/board-manager/static/
+sudo systemctl restart board-manager-v4 board-manager-v6
+```
+
+### 查看服务状态
 
 ```bash
 sudo systemctl status board-manager-v4 --no-pager
 sudo systemctl status board-manager-v6 --no-pager
 ```
 
-查看配置文件：
+### 查看配置文件
 
 ```bash
 cat /etc/board-manager.conf
 ```
 
----
+## 技术栈
 
-## 四、访问方式
+- **后端**：Python + FastAPI + SQLAlchemy
+- **前端**：Vue 3 + Vite
+- **部署**：systemd / Docker
 
-浏览器访问：
+## 许可证
 
-```text
-http://服务器IP:端口/
-```
-
-例如：
-
-```text
-http://192.168.1.4:8000/
-```
-
----
-
-## 五、如果出现 `{"detail":"UI not built"}`
-
-这表示前端静态文件没有成功部署到运行目录。  
-可手动重新构建并部署前端：
-
-```bash
-cd /root/lvyousms-web/frontend
-npm run build
-sudo mkdir -p /opt/board-manager/static
-sudo cp -a /root/lvyousms-web/frontend/dist/. /opt/board-manager/static/
-sudo systemctl restart board-manager-v4 board-manager-v6
-```
-
-然后重新访问首页。
-
----
-
-## 六、卸载
-
-如需卸载旧版本或当前版本，执行：
-
-```bash
-cd /root/lvyousms-web
-sudo bash uninstall.sh
-```
-
----
-
-## 七、手动彻底卸载（如卸载脚本不完整）
-
-```bash
-sudo systemctl stop board-manager-v4 board-manager-v6
-sudo systemctl disable board-manager-v4 board-manager-v6
-sudo rm -f /etc/systemd/system/board-manager-v4.service
-sudo rm -f /etc/systemd/system/board-manager-v6.service
-sudo systemctl daemon-reload
-
-sudo rm -rf /opt/board-manager
-sudo rm -f /etc/board-manager.conf
-```
-
-如果还要删除源码目录：
-
-```bash
-rm -rf /root/lvyousms-web
-```
-
----
-
-## 八、重新安装
-
-卸载完成后，重新进入项目目录执行：
-
-```bash
-cd /root/lvyousms-web
-sudo bash install.sh install
-```
-
----
-
-## 九、说明
-
-当前版本建议使用以下方式执行脚本：
-
-### 安装
-```bash
-sudo bash install.sh install
-```
-
-### 卸载
-```bash
-sudo bash uninstall.sh
-```
-
-这样可以避免由于脚本没有执行权限导致的安装失败问题。
-
----
-
-## 十、建议备份
-
-如果准备重装或迁移，建议先备份：
-
-```bash
-tar -czf /root/board-manager-backup-$(date +%F-%H%M).tar.gz /opt/board-manager /etc/board-manager.conf
-```
-
----
-
-## 十一、当前版本已知情况
-
-- 当前版本可正常安装和运行
-- 前端若未正确部署，可能出现 `UI not built`
-- 如遇该问题，可按上文“第五节”手动重新部署前端
-- 扫描后列表自动刷新体验仍有待进一步优化，但不影响基础使用
-```
+MIT License
