@@ -1,14 +1,16 @@
-# 绿邮X系列内网群控系统
+# 绿邮X系列内网群控系统 v3.4.0
 
 一个用于管理局域网内智能设备（如短信转发设备）的 Web 管理平台，支持设备扫描、短信发送、电话拨号、批量配置等功能。
 
 ## 功能特性
 
 - **设备管理**：自动扫描局域网设备，支持别名、分组管理
-- **短信发送**：通过设备 SIM 卡发送短信
-- **电话拨号**：支持 TTS 语音播报
+- **短信发送**：通过设备 SIM 卡发送短信，支持频率限制
+- **电话拨号**：支持 TTS 语音播报，频率控制防止滥用
 - **批量配置**：WiFi、SIM 卡号、消息转发等
 - **多种推送**：支持 Bark、SMTP、企业微信、钉钉、飞书、Server酱、PushPlus、WxPusher 等
+- **安全增强**：登录频率限制、请求频率控制、审计日志
+- **性能优化**：异步扫描任务、HTTP 连接池、多线程并发
 - **双栈支持**：同时支持 IPv4 和 IPv6 访问
 
 ## 安装方式
@@ -133,7 +135,15 @@ docker compose up -d
 | `BMDEVUSER` | admin | 设备扫描用户名 |
 | `BMDEVPASS` | admin | 设备扫描密码 |
 | `BMHTTPTIMEOUT` | 5.0 | HTTP 超时秒数 |
-| `BMSCANCONCURRENCY` | 32 | 扫描并发数 |
+| `BMSCANCONCURRENCY` | 64 | 扫描并发数 |
+| `BMTCPCONCURRENCY` | 128 | TCP 端口探测并发数 |
+| `BMSCANRETRIES` | 3 | 扫描重试次数 |
+| `BMSCANTTL` | 3600 | 扫描结果存活时间（秒） |
+| `BMSMSRATELIMIT` | 10 | 短信发送频率限制（次/分钟） |
+| `BMDIALRATELIMIT` | 5 | 电话拨号频率限制（次/分钟） |
+| `BMLOGINRATELIMIT` | 5 | 登录尝试频率限制（次/分钟） |
+| `BMSMSMAXLEN` | 500 | 短信内容最大长度 |
+| `BMALLOWORIGINS` | 空 | CORS 允许的域名，逗号分隔 |
 
 ## 卸载
 
@@ -185,9 +195,36 @@ cat /etc/board-manager.conf
 2. 检查端口是否被占用：`ss -tlnp | grep 8000`
 3. 查看容器日志：`docker logs lvyou-smsweb`
 
+## 版本更新 v3.4.0
+
+### 安全性增强
+- **登录频率限制**：防止暴力破解，默认5次/分钟
+- **请求频率控制**：短信发送和电话拨号频率限制
+- **审计日志**：记录关键操作（登录、扫描、短信、拨号）
+- **强化验证**：手机号格式验证、短信内容长度限制
+
+### 性能优化
+- **HTTP客户端升级**：从 `requests` 迁移到 `httpx`，支持异步和连接池
+- **异步扫描任务**：扫描改为后台任务，支持实时状态查询
+- **连接池管理**：优化HTTP连接复用，减少资源消耗
+- **并发配置优化**：提高扫描和探测的并发数
+
+### 功能完善
+- **扫描状态查询**：新增 `/api/scan/status/{scan_id}` 接口
+- **增强错误处理**：统一的异常处理机制和错误ID追踪
+- **数据验证强化**：使用 Pydantic 模型进行输入验证
+- **凭据安全**：扫描凭据通过 POST Body 传递，避免URL暴露
+
+### 环境变量新增
+- `BMSMSRATELIMIT` - 短信发送频率限制
+- `BMDIALRATELIMIT` - 电话拨号频率限制
+- `BMLOGINRATELIMIT` - 登录尝试频率限制
+- `BMSCANTTL` - 扫描结果存活时间
+- `BMSMSMAXLEN` - 短信内容最大长度
+
 ## 技术栈
 
-- **后端**：Python + FastAPI + SQLAlchemy
+- **后端**：Python + FastAPI + SQLAlchemy + httpx
 - **前端**：Vue 3 + Vite
 - **部署**：systemd / Docker
 
