@@ -459,6 +459,85 @@ def getdevicedata(ip: str, user: str, pw: str) -> Optional[Dict[str, Any]]:
     return None
 
 
+def get_wifi_info(ip: str, user: str, pw: str) -> Dict[str, str]:
+    keys_list = ["WIFI_NAME", "WIFI_DBM"]
+    body = f"keys={json.dumps({'keys': keys_list}, ensure_ascii=False)}"
+    try:
+        with httpx.Client(timeout=TIMEOUT, follow_redirects=False) as client:
+            resp = client.post(
+                f"http://{ip}/mgr",
+                params={"a": "getHtmlData_index"},
+                auth=httpx.DigestAuth(user, pw),
+                content=body.encode(),
+                headers={"Content-Type": "application/x-www-form-urlencoded"},
+            )
+            if resp.status_code == 200:
+                data = resp.json()
+                if isinstance(data, dict) and data.get("success") and isinstance(data.get("data"), dict):
+                    return {
+                        "wifiName": data["data"].get("WIFI_NAME", ""),
+                        "wifiDbm": data["data"].get("WIFI_DBM", ""),
+                    }
+    except Exception:
+        pass
+    return {"wifiName": "", "wifiDbm": ""}
+
+
+def read_device_config(ip: str, user: str, pw: str) -> Optional[str]:
+    keys_list = ["PROF"]
+    body = f"keys={json.dumps({'keys': keys_list}, ensure_ascii=False)}"
+    try:
+        with httpx.Client(timeout=TIMEOUT + 5, follow_redirects=False) as client:
+            resp = client.post(
+                f"http://{ip}/mgr",
+                params={"a": "getHtmlData_profMgr"},
+                auth=httpx.DigestAuth(user, pw),
+                content=body.encode(),
+                headers={"Content-Type": "application/x-www-form-urlencoded"},
+            )
+            if resp.status_code == 200:
+                data = resp.json()
+                if isinstance(data, dict) and data.get("success") and isinstance(data.get("data"), dict):
+                    return data["data"].get("PROF", "")
+    except Exception:
+        pass
+    return None
+
+
+def write_device_config(ip: str, user: str, pw: str, content: str) -> bool:
+    try:
+        with httpx.Client(timeout=TIMEOUT + 10, follow_redirects=False) as client:
+            resp = client.post(
+                f"http://{ip}/mgr",
+                params={"a": "updateProf"},
+                data={"PROPF": content},
+                auth=httpx.DigestAuth(user, pw),
+            )
+            return resp.status_code == 200
+    except Exception:
+        pass
+    return False
+
+
+def check_ota_update(ip: str, user: str, pw: str) -> Dict[str, Any]:
+    try:
+        with httpx.Client(timeout=TIMEOUT + 5, follow_redirects=False) as client:
+            resp = client.get(
+                f"http://{ip}/ota",
+                params={"a": "chkNewVer"},
+                auth=httpx.DigestAuth(user, pw),
+            )
+            if resp.status_code == 200:
+                data = resp.json()
+                return {
+                    "hasUpdate": bool(data.get("hasUpdate")),
+                    "newVer": str(data.get("newVer", "")),
+                }
+    except Exception:
+        pass
+    return {"hasUpdate": False, "newVer": ""}
+
+
 def _device_to_dict(device: Device) -> Dict[str, Any]:
     return {
         "id":      device.id,
@@ -674,6 +753,29 @@ class ScanStartReq(BaseModel):
     password: str = ""
 
 
+class BatchUpgradeReq(BaseModel):
+    device_ids: List[int]
+    url:        str = ""
+
+
+class BatchConfigReadReq(BaseModel):
+    device_ids: List[int]
+
+
+class BatchConfigPreviewReq(BaseModel):
+    device_ids:   List[int]
+    pattern:      str
+    replacement:  str = ""
+    flags:        str = ""
+
+
+class BatchConfigWriteReq(BaseModel):
+    device_ids:   List[int]
+    pattern:      str
+    replacement:  str = ""
+    flags:        str = ""
+
+
 # ── API Routes ────────────────────────────────────────────────────────────────
 
 # FIX: 加入登录频率限制 + audit 日志
@@ -735,6 +837,12 @@ def api_device_detail(devid: int, db: Session = Depends(get_db)):
     payload["sim1operator"] = device.sim1operator or ""
     payload["sim2number"]   = device.sim2number or ""
     payload["sim2operator"] = device.sim2operator or ""
+    # 实时获取 WiFi 名称和信号强度
+    _user = (device.user or DEFAULTUSER).strip()
+    _pw   = (device.passwd or DEFAULTPASS).strip()
+    wifi_info = get_wifi_info(device.ip, _user, _pw)
+    payload["wifiName"] = wifi_info["wifiName"]
+    payload["wifiDbm"]  = wifi_info["wifiDbm"]
     return {"device": payload, "forwardconfig": {}, "wifilist": []}
 
 
@@ -1202,3 +1310,153 @@ def tel_dial(req: DirectDialReq, db: Session = Depends(get_db)):
     except Exception as exc:
         logger.error("dial error device=%s: %s", req.deviceId, exc, exc_info=True)
         return {"ok": False, "error": "拨号失败，请稍后重试"}
+
+
+# ── OTA 升级 ─────────────────────────────────────────────────────────────────
+
+def upgrade_task_sync(device: Device, url: str) -> Dict[str, Any]:
+    ip   = device.ip
+    user = (device.user   or DEFAULTUSER).strip()
+    pw   = (device.passwd or DEFAULTPASS).strip()
+    try:
+        with httpx.Client(timeout=TIMEOUT + 30, follow_redirects=False) as client:
+            if url:
+                resp = client.get(
+                    f"http://{ip}/ota",
+                    params={"a": "do_upgrade", "url": url},
+                    auth=httpx.DigestAuth(user, pw),
+                )
+            else:
+                resp = client.get(
+                    f"http://{ip}/ota",
+                    params={"a": "updOtaOnline"},
+                    auth=httpx.DigestAuth(user, pw),
+                )
+            return {"id": device.id, "ip": ip, "ok": resp.status_code == 200,
+                    "mode": "url" if url else "online"}
+    except Exception as exc:
+        logger.warning("ota upgrade %s failed: %s", ip, exc)
+        return {"id": device.id, "ip": ip, "ok": False, "error": "升级请求失败，设备可能正在重启"}
+
+
+@app.post("/api/devices/batch/upgrade")
+def api_batch_upgrade(req: BatchUpgradeReq, db: Session = Depends(get_db)):
+    if not req.device_ids:
+        raise HTTPException(status_code=400, detail="device_ids required")
+    devices = db.query(Device).filter(Device.id.in_(req.device_ids)).all()
+    _audit("batch_upgrade", detail=f"count={len(devices)} url={req.url or 'online'}")
+    with concurrent.futures.ThreadPoolExecutor(max_workers=CONCURRENCY) as executor:
+        results = list(executor.map(lambda item: upgrade_task_sync(item, req.url), devices))
+    return {"results": results}
+
+
+@app.get("/api/devices/{devid}/ota/check")
+def api_ota_check(devid: int, db: Session = Depends(get_db)):
+    device = db.query(Device).filter(Device.id == devid).first()
+    if not device:
+        raise HTTPException(status_code=404, detail="Device not found")
+    user = (device.user   or DEFAULTUSER).strip()
+    pw   = (device.passwd or DEFAULTPASS).strip()
+    return check_ota_update(device.ip, user, pw)
+
+
+# ── 批量设备配置 ─────────────────────────────────────────────────────────────
+
+def _apply_regex(config: str, pattern: str, replacement: str, flags_str: str) -> Optional[str]:
+    try:
+        flags = 0
+        for f in flags_str.lower():
+            if f == 'i':   flags |= re.IGNORECASE
+            elif f == 'm': flags |= re.MULTILINE
+            elif f == 's': flags |= re.DOTALL
+        return re.sub(pattern, replacement, config, flags=flags)
+    except re.error:
+        return None
+
+
+def config_read_task_sync(device: Device) -> Dict[str, Any]:
+    ip   = device.ip
+    user = (device.user   or DEFAULTUSER).strip()
+    pw   = (device.passwd or DEFAULTPASS).strip()
+    try:
+        config = read_device_config(ip, user, pw)
+        if config is None:
+            return {"id": device.id, "ip": ip, "ok": False, "error": "读取配置失败"}
+        return {"id": device.id, "ip": ip, "ok": True, "config": config}
+    except Exception as exc:
+        return {"id": device.id, "ip": ip, "ok": False, "error": str(exc)}
+
+
+@app.post("/api/devices/batch/config/read")
+def api_batch_config_read(req: BatchConfigReadReq, db: Session = Depends(get_db)):
+    if not req.device_ids:
+        raise HTTPException(status_code=400, detail="device_ids required")
+    devices = db.query(Device).filter(Device.id.in_(req.device_ids)).all()
+    with concurrent.futures.ThreadPoolExecutor(max_workers=CONCURRENCY) as executor:
+        configs = list(executor.map(config_read_task_sync, devices))
+    return {"configs": configs}
+
+
+@app.post("/api/devices/batch/config/preview")
+def api_batch_config_preview(req: BatchConfigPreviewReq, db: Session = Depends(get_db)):
+    if not req.device_ids:
+        raise HTTPException(status_code=400, detail="device_ids required")
+    if not req.pattern:
+        raise HTTPException(status_code=400, detail="正则表达式不能为空")
+    devices = db.query(Device).filter(Device.id.in_(req.device_ids)).all()
+    previews = []
+    for device in devices:
+        ip   = device.ip
+        user = (device.user   or DEFAULTUSER).strip()
+        pw   = (device.passwd or DEFAULTPASS).strip()
+        config = read_device_config(ip, user, pw)
+        if config is None:
+            previews.append({"id": device.id, "ip": ip, "ok": False, "error": "读取配置失败"})
+            continue
+        replaced = _apply_regex(config, req.pattern, req.replacement, req.flags)
+        if replaced is None:
+            previews.append({"id": device.id, "ip": ip, "ok": False, "error": "正则表达式无效"})
+            continue
+        previews.append({
+            "id": device.id, "ip": ip, "ok": True,
+            "original": config, "replaced": replaced,
+            "changed": config != replaced,
+        })
+    return {"previews": previews}
+
+
+def config_write_task_sync(device: Device, pattern: str, replacement: str, flags_str: str) -> Dict[str, Any]:
+    ip   = device.ip
+    user = (device.user   or DEFAULTUSER).strip()
+    pw   = (device.passwd or DEFAULTPASS).strip()
+    try:
+        config = read_device_config(ip, user, pw)
+        if config is None:
+            return {"id": device.id, "ip": ip, "ok": False, "error": "读取配置失败"}
+        replaced = _apply_regex(config, pattern, replacement, flags_str)
+        if replaced is None:
+            return {"id": device.id, "ip": ip, "ok": False, "error": "正则表达式无效"}
+        if config == replaced:
+            return {"id": device.id, "ip": ip, "ok": True, "changed": False}
+        if not write_device_config(ip, user, pw, replaced):
+            return {"id": device.id, "ip": ip, "ok": False, "error": "写入配置失败"}
+        _audit("config_write", detail=f"device={device.id} ip={ip}")
+        return {"id": device.id, "ip": ip, "ok": True, "changed": True}
+    except Exception as exc:
+        return {"id": device.id, "ip": ip, "ok": False, "error": str(exc)}
+
+
+@app.post("/api/devices/batch/config/write")
+def api_batch_config_write(req: BatchConfigWriteReq, db: Session = Depends(get_db)):
+    if not req.device_ids:
+        raise HTTPException(status_code=400, detail="device_ids required")
+    if not req.pattern:
+        raise HTTPException(status_code=400, detail="正则表达式不能为空")
+    devices = db.query(Device).filter(Device.id.in_(req.device_ids)).all()
+    _audit("batch_config_write", detail=f"count={len(devices)} pattern={req.pattern}")
+    with concurrent.futures.ThreadPoolExecutor(max_workers=CONCURRENCY) as executor:
+        results = list(executor.map(
+            lambda item: config_write_task_sync(item, req.pattern, req.replacement, req.flags),
+            devices,
+        ))
+    return {"results": results}

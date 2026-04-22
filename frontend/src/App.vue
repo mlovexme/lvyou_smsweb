@@ -32,10 +32,23 @@ const selectAll = ref(false)
 
 const showWifiModal = ref(false)
 const showDetailModal = ref(false)
+const showUpgradeModal = ref(false)
+const showConfigModal = ref(false)
 
 const wifiSsid = ref('')
 const wifiPwd = ref('')
 const deviceDetail = ref(null)
+
+const upgradeMode = ref('online')
+const upgradeUrl = ref('')
+
+const configStep = ref('read')
+const configData = ref([])
+const configPattern = ref('')
+const configReplacement = ref('')
+const configFlags = ref('')
+const configPreviewData = ref([])
+const configExpandedIds = ref([])
 
 const scanCidr = ref('')
 const scanUser = ref('admin')
@@ -513,6 +526,189 @@ async function saveSimSingle() {
     loading.value = false
   }
 }
+
+function wifiDbmColor(dbm) {
+  const v = parseInt(dbm, 10)
+  if (isNaN(v)) return 'var(--text-secondary)'
+  if (v >= 60) return 'var(--success)'
+  if (v >= 30) return 'var(--warning)'
+  return 'var(--danger)'
+}
+
+function wifiDbmLabel(dbm) {
+  const v = parseInt(dbm, 10)
+  if (isNaN(v) || !dbm) return '-'
+  if (v >= 60) return `${dbm} (强)`
+  if (v >= 30) return `${dbm} (中)`
+  return `${dbm} (弱)`
+}
+
+async function checkOtaForDevice() {
+  const id = deviceDetail.value && deviceDetail.value.device && deviceDetail.value.device.id
+  if (!id) return
+  loading.value = true
+  try {
+    const resp = await api.get('/api/devices/' + id + '/ota/check')
+    const data = resp.data || {}
+    if (data.hasUpdate) {
+      setNotice(`发现新版本: v${data.newVer}`, 'ok')
+    } else {
+      setNotice('当前已是最新版本', 'info')
+    }
+  } catch (e) {
+    setNotice((e && e.response && e.response.data && e.response.data.detail) || '检查更新失败', 'err')
+  } finally {
+    loading.value = false
+  }
+}
+
+function openUpgradeModal() {
+  if (!selectedCount.value) {
+    setNotice('请先勾选设备', 'err')
+    return
+  }
+  upgradeMode.value = 'online'
+  upgradeUrl.value = ''
+  showUpgradeModal.value = true
+}
+
+function closeUpgradeModal() {
+  showUpgradeModal.value = false
+}
+
+async function applyUpgrade() {
+  if (!selectedCount.value) return
+  const mode = upgradeMode.value === 'url' ? `URL: ${upgradeUrl.value}` : '在线升级'
+  if (!confirm(`确认对 ${selectedCount.value} 台设备执行${mode}？\n升级后设备会自动重启。`)) return
+  loading.value = true
+  try {
+    const resp = await api.post('/api/devices/batch/upgrade', {
+      device_ids: selectedIds.value,
+      url: upgradeMode.value === 'url' ? upgradeUrl.value.trim() : ''
+    })
+    const results = resp.data && resp.data.results || []
+    const okCount = results.filter(r => r.ok).length
+    setNotice(`升级请求已发送: ${okCount}/${results.length} 成功`, okCount ? 'ok' : 'err')
+    closeUpgradeModal()
+  } catch (e) {
+    setNotice((e && e.response && e.response.data && e.response.data.detail) || '升级失败', 'err')
+  } finally {
+    loading.value = false
+  }
+}
+
+function openConfigModal() {
+  if (!selectedCount.value) {
+    setNotice('请先勾选设备', 'err')
+    return
+  }
+  configStep.value = 'read'
+  configData.value = []
+  configPattern.value = ''
+  configReplacement.value = ''
+  configFlags.value = ''
+  configPreviewData.value = []
+  configExpandedIds.value = []
+  showConfigModal.value = true
+}
+
+function closeConfigModal() {
+  showConfigModal.value = false
+  configData.value = []
+  configPreviewData.value = []
+}
+
+async function readConfigs() {
+  loading.value = true
+  try {
+    const resp = await api.post('/api/devices/batch/config/read', {
+      device_ids: selectedIds.value
+    })
+    configData.value = resp.data && resp.data.configs || []
+    configStep.value = 'edit'
+    if (configData.value.length > 0) {
+      configExpandedIds.value = [configData.value[0].id]
+    }
+  } catch (e) {
+    setNotice((e && e.response && e.response.data && e.response.data.detail) || '读取配置失败', 'err')
+  } finally {
+    loading.value = false
+  }
+}
+
+function toggleConfigExpand(id) {
+  const idx = configExpandedIds.value.indexOf(id)
+  if (idx > -1) {
+    configExpandedIds.value.splice(idx, 1)
+  } else {
+    configExpandedIds.value.push(id)
+  }
+}
+
+async function previewConfig() {
+  if (!configPattern.value.trim()) {
+    setNotice('请输入正则表达式', 'err')
+    return
+  }
+  loading.value = true
+  try {
+    const resp = await api.post('/api/devices/batch/config/preview', {
+      device_ids: selectedIds.value,
+      pattern: configPattern.value,
+      replacement: configReplacement.value,
+      flags: configFlags.value
+    })
+    configPreviewData.value = resp.data && resp.data.previews || []
+    configStep.value = 'preview'
+    if (configPreviewData.value.length > 0) {
+      configExpandedIds.value = [configPreviewData.value[0].id]
+    }
+  } catch (e) {
+    setNotice((e && e.response && e.response.data && e.response.data.detail) || '预览失败', 'err')
+  } finally {
+    loading.value = false
+  }
+}
+
+async function writeConfigs() {
+  if (!confirm(`确认对 ${selectedCount.value} 台设备写入配置？\n此操作不可撤销，请确认预览结果正确。`)) return
+  loading.value = true
+  try {
+    const resp = await api.post('/api/devices/batch/config/write', {
+      device_ids: selectedIds.value,
+      pattern: configPattern.value,
+      replacement: configReplacement.value,
+      flags: configFlags.value
+    })
+    const results = resp.data && resp.data.results || []
+    const okCount = results.filter(r => r.ok).length
+    const changedCount = results.filter(r => r.changed).length
+    setNotice(`配置写入完成: ${okCount}/${results.length} 成功, ${changedCount} 台有变更`, okCount ? 'ok' : 'err')
+    closeConfigModal()
+  } catch (e) {
+    setNotice((e && e.response && e.response.data && e.response.data.detail) || '写入失败', 'err')
+  } finally {
+    loading.value = false
+  }
+}
+
+function diffLines(original, replaced) {
+  const oLines = (original || '').split('\n')
+  const rLines = (replaced || '').split('\n')
+  const maxLen = Math.max(oLines.length, rLines.length)
+  const lines = []
+  for (let i = 0; i < maxLen; i++) {
+    const o = oLines[i] !== undefined ? oLines[i] : ''
+    const r = rLines[i] !== undefined ? rLines[i] : ''
+    if (o === r) {
+      lines.push({ type: 'same', text: o })
+    } else {
+      if (o) lines.push({ type: 'del', text: o })
+      if (r) lines.push({ type: 'add', text: r })
+    }
+  }
+  return lines
+}
 </script>
 
 <template>
@@ -648,6 +844,8 @@ async function saveSimSingle() {
         </div>
         <div class="toolbar-right">
           <button class="toolbar-btn" @click="openWifiModal" :disabled="selectedCount === 0">📶 WiFi</button>
+          <button class="toolbar-btn" @click="openUpgradeModal" :disabled="selectedCount === 0">⬆️ 升级</button>
+          <button class="toolbar-btn" @click="openConfigModal" :disabled="selectedCount === 0">⚙️ 配置</button>
           <button class="toolbar-btn danger" @click="batchDeleteSelected" :disabled="selectedCount === 0">🗑️ 删除</button>
         </div>
       </div>
@@ -780,6 +978,103 @@ async function saveSimSingle() {
         </div>
       </div>
 
+      <div v-if="showUpgradeModal" class="modal-overlay" @click.self="closeUpgradeModal">
+        <div class="modal">
+          <div class="modal-header">
+            <h3>⬆️ 批量 OTA 升级</h3>
+            <button class="modal-close" @click="closeUpgradeModal">×</button>
+          </div>
+          <div class="modal-body">
+            <p class="config-info">将对 {{ selectedCount }} 台设备执行升级，升级后设备会自动重启。</p>
+            <div class="radio-group">
+              <label class="radio-label">
+                <input type="radio" v-model="upgradeMode" value="online" />
+                <span>在线升级（设备联网下载）</span>
+              </label>
+              <label class="radio-label">
+                <input type="radio" v-model="upgradeMode" value="url" />
+                <span>指定固件 URL</span>
+              </label>
+            </div>
+            <input v-if="upgradeMode === 'url'" v-model="upgradeUrl" class="form-input" placeholder="固件下载地址 (http://...)" />
+          </div>
+          <div class="modal-footer">
+            <button class="btn-cancel" @click="closeUpgradeModal">取消</button>
+            <button class="btn-confirm" @click="applyUpgrade" :disabled="loading || (upgradeMode === 'url' && !upgradeUrl.trim())">确认升级</button>
+          </div>
+        </div>
+      </div>
+
+      <div v-if="showConfigModal" class="modal-overlay" @click.self="closeConfigModal">
+        <div class="modal modal-lg">
+          <div class="modal-header">
+            <h3>⚙️ 批量设备配置</h3>
+            <button class="modal-close" @click="closeConfigModal">×</button>
+          </div>
+          <div class="modal-body">
+            <!-- 步骤1: 读取 -->
+            <div v-if="configStep === 'read'">
+              <p class="config-info">将读取 {{ selectedCount }} 台设备的配置文件内容。</p>
+              <button class="btn-confirm" @click="readConfigs" :disabled="loading" style="width:100%">📖 读取配置</button>
+            </div>
+
+            <!-- 步骤2: 编辑正则 -->
+            <div v-if="configStep === 'edit'">
+              <div class="config-devices-list">
+                <div v-for="c in configData" :key="c.id" class="config-device-item">
+                  <div class="config-device-header" @click="toggleConfigExpand(c.id)">
+                    <span>{{ c.ip }}</span>
+                    <span :class="['config-status', c.ok ? 'ok' : 'err']">{{ c.ok ? '✓' : '✗' }}</span>
+                    <span class="config-expand-icon">{{ configExpandedIds.includes(c.id) ? '▼' : '▶' }}</span>
+                  </div>
+                  <div v-if="configExpandedIds.includes(c.id)" class="config-content">
+                    <pre v-if="c.ok" class="config-pre">{{ c.config }}</pre>
+                    <span v-else class="config-error">{{ c.error }}</span>
+                  </div>
+                </div>
+              </div>
+              <div class="config-regex-section">
+                <p class="config-section-title">正则替换规则</p>
+                <input v-model="configPattern" class="form-input" placeholder="正则表达式 (pattern)" />
+                <input v-model="configReplacement" class="form-input" placeholder="替换文本 (replacement)" />
+                <input v-model="configFlags" class="form-input" placeholder="标志位 (如 i=忽略大小写, m=多行, s=点号匹配换行)" />
+                <div class="config-btn-row">
+                  <button class="btn-cancel" @click="configStep = 'read'">上一步</button>
+                  <button class="btn-confirm" @click="previewConfig" :disabled="loading || !configPattern.trim()">预览替换</button>
+                </div>
+              </div>
+            </div>
+
+            <!-- 步骤3: 预览 -->
+            <div v-if="configStep === 'preview'">
+              <div class="config-devices-list">
+                <div v-for="p in configPreviewData" :key="p.id" class="config-device-item">
+                  <div class="config-device-header" @click="toggleConfigExpand(p.id)">
+                    <span>{{ p.ip }}</span>
+                    <span v-if="p.ok" :class="['config-status', p.changed ? 'warn' : 'ok']">{{ p.changed ? '有变更' : '无变更' }}</span>
+                    <span v-else class="config-status err">错误</span>
+                    <span class="config-expand-icon">{{ configExpandedIds.includes(p.id) ? '▼' : '▶' }}</span>
+                  </div>
+                  <div v-if="configExpandedIds.includes(p.id)" class="config-content">
+                    <div v-if="p.ok && p.changed" class="config-diff">
+                      <div v-for="(line, idx) in diffLines(p.original, p.replaced)" :key="idx" :class="['diff-line', 'diff-' + line.type]">
+                        <span class="diff-prefix">{{ line.type === 'add' ? '+' : line.type === 'del' ? '-' : ' ' }}</span>{{ line.text }}
+                      </div>
+                    </div>
+                    <pre v-else-if="p.ok" class="config-pre">{{ p.original }}</pre>
+                    <span v-else class="config-error">{{ p.error }}</span>
+                  </div>
+                </div>
+              </div>
+              <div class="config-btn-row">
+                <button class="btn-cancel" @click="configStep = 'edit'">返回修改</button>
+                <button class="btn-confirm danger-btn" @click="writeConfigs" :disabled="loading">确认写入</button>
+              </div>
+            </div>
+          </div>
+        </div>
+      </div>
+
       <div v-if="showDetailModal && deviceDetail" class="modal-overlay" @click.self="closeDetailModal">
         <div class="modal">
           <div class="modal-header">
@@ -803,6 +1098,11 @@ async function saveSimSingle() {
               <div class="detail-item"><span class="detail-label">SIM1 运营商</span><span>{{ deviceDetail.device && deviceDetail.device.sim1operator || '-' }}</span></div>
               <div class="detail-item"><span class="detail-label">SIM2 号码</span><span class="mono">{{ deviceDetail.device && deviceDetail.device.sim2number || '-' }}</span></div>
               <div class="detail-item"><span class="detail-label">SIM2 运营商</span><span>{{ deviceDetail.device && deviceDetail.device.sim2operator || '-' }}</span></div>
+              <div class="detail-item"><span class="detail-label">WiFi 名称</span><span>{{ deviceDetail.device && deviceDetail.device.wifiName || '-' }}</span></div>
+              <div class="detail-item"><span class="detail-label">信号强度</span><span :style="{ color: wifiDbmColor(deviceDetail.device && deviceDetail.device.wifiDbm) }">{{ wifiDbmLabel(deviceDetail.device && deviceDetail.device.wifiDbm) }}</span></div>
+            </div>
+            <div class="detail-actions">
+              <button class="btn-confirm" @click="checkOtaForDevice" :disabled="loading">🔍 检查更新</button>
             </div>
             <div class="sim-edit-section">
               <p class="sim-edit-title">编辑 SIM 卡号</p>
@@ -1005,6 +1305,42 @@ body {
 
 .sim-edit-section { border-top: 1px solid var(--border); padding-top: 14px; display: flex; flex-direction: column; gap: 8px; }
 .sim-edit-title { font-size: 13px; color: var(--text-secondary); margin-bottom: 2px; }
+
+.detail-actions { display: flex; gap: 8px; padding: 10px 0; border-top: 1px solid var(--border); margin-top: 8px; }
+.detail-actions .btn-confirm { padding: 8px 16px; font-size: 13px; }
+
+.radio-group { display: flex; flex-direction: column; gap: 10px; margin: 12px 0; }
+.radio-label { display: flex; align-items: center; gap: 8px; cursor: pointer; font-size: 14px; color: var(--text-primary); }
+.radio-label input[type="radio"] { accent-color: var(--primary); width: 16px; height: 16px; }
+
+.config-info { font-size: 13px; color: var(--text-secondary); margin-bottom: 12px; }
+.config-section-title { font-size: 13px; color: var(--text-secondary); margin-bottom: 6px; }
+.config-btn-row { display: flex; gap: 10px; margin-top: 10px; }
+
+.config-devices-list { display: flex; flex-direction: column; gap: 8px; margin-bottom: 14px; max-height: 300px; overflow-y: auto; }
+.config-device-item { border: 1px solid var(--border); border-radius: 8px; overflow: hidden; }
+.config-device-header { display: flex; align-items: center; gap: 10px; padding: 10px 14px; cursor: pointer; background: var(--bg-dark); font-size: 13px; }
+.config-device-header:hover { background: var(--bg-card-hover); }
+.config-expand-icon { font-size: 10px; color: var(--text-secondary); margin-left: auto; }
+.config-status { font-size: 11px; padding: 2px 6px; border-radius: 3px; }
+.config-status.ok { background: rgba(16,185,129,0.2); color: var(--success); }
+.config-status.err { background: rgba(239,68,68,0.2); color: var(--danger); }
+.config-status.warn { background: rgba(245,158,11,0.2); color: var(--warning); }
+.config-content { padding: 10px 14px; }
+.config-pre { font-family: monospace; font-size: 11px; white-space: pre-wrap; word-break: break-all; color: var(--text-primary); max-height: 200px; overflow-y: auto; line-height: 1.5; }
+.config-error { font-size: 12px; color: var(--danger); }
+
+.config-regex-section { border-top: 1px solid var(--border); padding-top: 14px; display: flex; flex-direction: column; gap: 8px; }
+
+.config-diff { font-family: monospace; font-size: 11px; line-height: 1.6; white-space: pre-wrap; word-break: break-all; max-height: 300px; overflow-y: auto; }
+.diff-line { padding: 1px 0; }
+.diff-prefix { display: inline-block; width: 16px; font-weight: bold; }
+.diff-same { color: var(--text-secondary); }
+.diff-add { color: var(--success); background: rgba(16,185,129,0.1); }
+.diff-del { color: var(--danger); background: rgba(239,68,68,0.1); text-decoration: line-through; }
+
+.danger-btn { background: var(--danger) !important; }
+.danger-btn:hover:not(:disabled) { background: #dc2626 !important; }
 
 @media (max-width: 640px) {
   .header { flex-direction: column; align-items: flex-start; }
