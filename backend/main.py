@@ -757,6 +757,14 @@ class BatchUpgradeReq(BaseModel):
     device_ids: List[int]
     url:        str = ""
 
+    @field_validator("url")
+    @classmethod
+    def _check_url(cls, v):
+        v = (v or "").strip()
+        if v and not v.startswith(("http://", "https://")):
+            raise ValueError("固件URL必须以 http:// 或 https:// 开头")
+        return v
+
 
 class BatchConfigReadReq(BaseModel):
     device_ids: List[int]
@@ -768,12 +776,54 @@ class BatchConfigPreviewReq(BaseModel):
     replacement:  str = ""
     flags:        str = ""
 
+    @field_validator("pattern")
+    @classmethod
+    def _check_pattern(cls, v):
+        v = (v or "").strip()
+        if not v:
+            raise ValueError("正则表达式不能为空")
+        try:
+            re.compile(v)
+        except re.error as e:
+            raise ValueError(f"无效的正则表达式: {e}")
+        return v
+
+    @field_validator("flags")
+    @classmethod
+    def _check_flags(cls, v):
+        v = (v or "").strip().lower()
+        invalid = set(v) - {"i", "m", "s"}
+        if invalid:
+            raise ValueError(f"不支持的标志位: {invalid}，仅支持 i/m/s")
+        return v
+
 
 class BatchConfigWriteReq(BaseModel):
     device_ids:   List[int]
     pattern:      str
     replacement:  str = ""
     flags:        str = ""
+
+    @field_validator("pattern")
+    @classmethod
+    def _check_pattern(cls, v):
+        v = (v or "").strip()
+        if not v:
+            raise ValueError("正则表达式不能为空")
+        try:
+            re.compile(v)
+        except re.error as e:
+            raise ValueError(f"无效的正则表达式: {e}")
+        return v
+
+    @field_validator("flags")
+    @classmethod
+    def _check_flags(cls, v):
+        v = (v or "").strip().lower()
+        invalid = set(v) - {"i", "m", "s"}
+        if invalid:
+            raise ValueError(f"不支持的标志位: {invalid}，仅支持 i/m/s")
+        return v
 
 
 # ── API Routes ────────────────────────────────────────────────────────────────
@@ -1369,8 +1419,10 @@ def _apply_regex(config: str, pattern: str, replacement: str, flags_str: str) ->
             if f == 'i':   flags |= re.IGNORECASE
             elif f == 'm': flags |= re.MULTILINE
             elif f == 's': flags |= re.DOTALL
-        return re.sub(pattern, replacement, config, flags=flags)
-    except re.error:
+        # 预编译正则，限制复杂度防 ReDoS
+        compiled = re.compile(pattern, flags)
+        return compiled.sub(replacement, config)
+    except (re.error, IndexError):
         return None
 
 
@@ -1383,8 +1435,8 @@ def config_read_task_sync(device: Device) -> Dict[str, Any]:
         if config is None:
             return {"id": device.id, "ip": ip, "ok": False, "error": "读取配置失败"}
         return {"id": device.id, "ip": ip, "ok": True, "config": config}
-    except Exception as exc:
-        return {"id": device.id, "ip": ip, "ok": False, "error": str(exc)}
+    except Exception:
+        return {"id": device.id, "ip": ip, "ok": False, "error": "读取配置异常"}
 
 
 @app.post("/api/devices/batch/config/read")
@@ -1397,31 +1449,35 @@ def api_batch_config_read(req: BatchConfigReadReq, db: Session = Depends(get_db)
     return {"configs": configs}
 
 
+def _preview_one(device: Device, pattern: str, replacement: str, flags_str: str) -> Dict[str, Any]:
+    ip   = device.ip
+    user = (device.user   or DEFAULTUSER).strip()
+    pw   = (device.passwd or DEFAULTPASS).strip()
+    try:
+        config = read_device_config(ip, user, pw)
+        if config is None:
+            return {"id": device.id, "ip": ip, "ok": False, "error": "读取配置失败"}
+        replaced = _apply_regex(config, pattern, replacement, flags_str)
+        if replaced is None:
+            return {"id": device.id, "ip": ip, "ok": False, "error": "正则表达式无效"}
+        return {
+            "id": device.id, "ip": ip, "ok": True,
+            "original": config, "replaced": replaced,
+            "changed": config != replaced,
+        }
+    except Exception:
+        return {"id": device.id, "ip": ip, "ok": False, "error": "预览失败"}
+
+
 @app.post("/api/devices/batch/config/preview")
 def api_batch_config_preview(req: BatchConfigPreviewReq, db: Session = Depends(get_db)):
     if not req.device_ids:
         raise HTTPException(status_code=400, detail="device_ids required")
-    if not req.pattern:
-        raise HTTPException(status_code=400, detail="正则表达式不能为空")
     devices = db.query(Device).filter(Device.id.in_(req.device_ids)).all()
-    previews = []
-    for device in devices:
-        ip   = device.ip
-        user = (device.user   or DEFAULTUSER).strip()
-        pw   = (device.passwd or DEFAULTPASS).strip()
-        config = read_device_config(ip, user, pw)
-        if config is None:
-            previews.append({"id": device.id, "ip": ip, "ok": False, "error": "读取配置失败"})
-            continue
-        replaced = _apply_regex(config, req.pattern, req.replacement, req.flags)
-        if replaced is None:
-            previews.append({"id": device.id, "ip": ip, "ok": False, "error": "正则表达式无效"})
-            continue
-        previews.append({
-            "id": device.id, "ip": ip, "ok": True,
-            "original": config, "replaced": replaced,
-            "changed": config != replaced,
-        })
+    with concurrent.futures.ThreadPoolExecutor(max_workers=CONCURRENCY) as executor:
+        previews = list(executor.map(
+            lambda item: _preview_one(item, req.pattern, req.replacement, req.flags), devices,
+        ))
     return {"previews": previews}
 
 
@@ -1442,8 +1498,8 @@ def config_write_task_sync(device: Device, pattern: str, replacement: str, flags
             return {"id": device.id, "ip": ip, "ok": False, "error": "写入配置失败"}
         _audit("config_write", detail=f"device={device.id} ip={ip}")
         return {"id": device.id, "ip": ip, "ok": True, "changed": True}
-    except Exception as exc:
-        return {"id": device.id, "ip": ip, "ok": False, "error": str(exc)}
+    except Exception:
+        return {"id": device.id, "ip": ip, "ok": False, "error": "写入配置异常"}
 
 
 @app.post("/api/devices/batch/config/write")

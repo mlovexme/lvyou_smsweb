@@ -574,12 +574,18 @@ function openUpgradeModal() {
 
 function closeUpgradeModal() {
   showUpgradeModal.value = false
+  upgradeMode.value = 'online'
+  upgradeUrl.value = ''
 }
 
 async function applyUpgrade() {
   if (!selectedCount.value) return
+  if (upgradeMode.value === 'url' && !upgradeUrl.value.trim()) {
+    setNotice('请输入固件下载地址', 'err')
+    return
+  }
   const mode = upgradeMode.value === 'url' ? `URL: ${upgradeUrl.value}` : '在线升级'
-  if (!confirm(`确认对 ${selectedCount.value} 台设备执行${mode}？\n升级后设备会自动重启。`)) return
+  if (!confirm(`确认对 ${selectedCount.value} 台设备执行${mode}?\n升级后设备会自动重启。`)) return
   loading.value = true
   try {
     const resp = await api.post('/api/devices/batch/upgrade', {
@@ -614,8 +620,13 @@ function openConfigModal() {
 
 function closeConfigModal() {
   showConfigModal.value = false
+  configStep.value = 'read'
   configData.value = []
+  configPattern.value = ''
+  configReplacement.value = ''
+  configFlags.value = ''
   configPreviewData.value = []
+  configExpandedIds.value = []
 }
 
 async function readConfigs() {
