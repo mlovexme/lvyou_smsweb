@@ -1,4 +1,4 @@
-# 绿邮X系列内网群控系统 v3.4.0
+# 绿邮X系列内网群控系统 v5.0
 
 一个用于管理局域网内智能设备（如短信转发设备）的 Web 管理平台，支持设备扫描、短信发送、电话拨号、批量配置等功能。
 
@@ -119,7 +119,7 @@ docker-compose -f docker-compose.prod.yml up -d
 
 ```yaml
 # 详见 docker-compose.yml 文件
-# 包含完整的 v3.4.0 环境变量配置
+# 包含完整的 v5.0 环境变量配置
 ```
 
 启动命令：
@@ -160,7 +160,7 @@ docker compose up -d
 ./build-docker.sh
 
 # 构建指定版本
-./build-docker.sh -t v3.4.0
+./build-docker.sh -t v5.0
 
 # 多平台构建并推送到 Docker Hub（需要登录）
 ./build-docker.sh -p --platform linux/amd64,linux/arm64
@@ -271,7 +271,7 @@ cat /etc/board-manager.conf
 2. 检查端口是否被占用：`ss -tlnp | grep 8000`
 3. 查看容器日志：`docker logs lvyou-smsweb`
 
-## 版本更新 v3.4.0
+## 版本更新 v5.0
 
 ### 安全性增强
 - **登录频率限制**：防止暴力破解，默认5次/分钟

@@ -451,7 +451,7 @@ async def lifespan(app: FastAPI):
             pass
 
 
-app = FastAPI(title="Board LAN Hub", version="3.4.0", lifespan=lifespan)
+app = FastAPI(title="Board LAN Hub", version="5.0", lifespan=lifespan)
 _setup_exception_handlers(app)
 
 
