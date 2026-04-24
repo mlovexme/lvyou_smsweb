@@ -96,9 +96,9 @@ ENV SERVER_PORT=8000
 # 暴露端口
 EXPOSE 8000
 
-# 健康检查（CMD-SHELL 形式，容器内运行时解析 SERVER_PORT）
+# 健康检查（shell 形式，容器内运行时解析 SERVER_PORT）
 HEALTHCHECK --interval=30s --timeout=10s --start-period=5s --retries=3 \
-    CMD-SHELL 'curl -f "http://localhost:$$SERVER_PORT/api/health" || exit 1'
+    CMD curl -f "http://localhost:${SERVER_PORT}/api/health" || exit 1
 
 # 启动命令（支持自定义端口，同时监听 IPv4 和 IPv6）
 CMD ["sh", "-c", "python -m uvicorn backend.main:app --host 0.0.0.0 --port ${SERVER_PORT} & python -m uvicorn backend.main:app --host :: --port ${SERVER_PORT} & wait"]
