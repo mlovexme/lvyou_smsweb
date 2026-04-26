@@ -8,6 +8,7 @@ import { ref } from 'vue'
 import { api } from '../api/client'
 import { clearStoredAuth, restoreAuth as restoreStoredAuth, saveAuth } from '../api/auth'
 import { healthApi, loginApi, logoutApi } from '../api/endpoints'
+import { useDevicesStore } from './devices'
 import { useNoticeStore } from './notice'
 
 export const useAuthStore = defineStore('auth', () => {
@@ -76,6 +77,13 @@ export const useAuthStore = defineStore('auth', () => {
     authed.value = false
     uiPass.value = ''
     clearStoredAuth()
+    // FIX(Devin Review #6): Clearing device selection here mirrors the
+    // pre-Pinia App.vue logout flow. Without this, a 401 auto-logout
+    // (triggered by the response interceptor below) would leave
+    // selectedIds populated, so when the user logs back in
+    // selectedCount would show a phantom count and a batch action
+    // could send stale device IDs to the server.
+    useDevicesStore().clearSelection()
     if (showMsg) {
       notice.set('已退出登录', 'info')
     } else {

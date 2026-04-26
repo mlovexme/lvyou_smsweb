@@ -125,8 +125,10 @@ async function login() {
 }
 
 async function logout(showMsg = false) {
+  // authStore.logout() also clears the device selection (see store impl
+  // for the 401-interceptor regression note), so this wrapper is purely
+  // a thin adapter for the LoginView's @logout event.
   await authStore.logout(showMsg)
-  devicesStore.clearSelection()
 }
 
 async function refresh() {
