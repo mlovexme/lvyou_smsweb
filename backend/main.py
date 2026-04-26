@@ -47,7 +47,11 @@ SCAN_RETRIES       = int(os.environ.get("BMSCANRETRIES",     "3"))
 SCAN_RETRY_SLEEP_MS= int(os.environ.get("BMSCANRETRYSLEEPMS","300"))
 SCAN_TTL           = int(os.environ.get("BMSCANTTL",         str(3600)))
 UIUSER             = os.environ.get("BMUIUSER",  "admin")
-UIPASS             = os.environ.get("BMUIPASS",  "admin")
+# FIX(P0#1): default to empty so an unset BMUIPASS cannot accidentally allow
+# admin/admin login. Combined with validate_startup_security() below, the
+# server refuses to start unless BMUIPASS is explicitly set to a non-default
+# value (override with BMINSECURE_DEFAULT_PASSWORD=1 for local development).
+UIPASS             = os.environ.get("BMUIPASS",  "")
 TOKEN_TTL_SECONDS  = int(os.environ.get("BMTOKENTTL", str(8 * 60 * 60)))
 PREWARM_CONCURRENCY = int(os.environ.get("BMPREWARMCONCURRENCY", "64"))
 OTA_BATCH_MAX      = int(os.environ.get("BMOTABATCHMAX",       "64"))
@@ -358,6 +362,25 @@ def _check_login_credentials(username: str, password: str) -> bool:
     return hmac.compare_digest(username, UIUSER) and hmac.compare_digest(password, UIPASS)
 
 
+def _env_truthy(name: str) -> bool:
+    return os.environ.get(name, "").strip().lower() in {"1", "true", "yes", "on"}
+
+
+def _validate_startup_security() -> None:
+    """FIX(P0#1): refuse to start with an empty or default BMUIPASS unless the
+    operator explicitly opts into the insecure default for local development.
+
+    This guard is what makes the documented `BMUIPASS` requirement actually
+    enforceable -- without it, an unset env var silently falls back to
+    admin/admin, which is exactly the regression that prompted this fix."""
+    if (not UIPASS or UIPASS == "admin") and not _env_truthy("BMINSECURE_DEFAULT_PASSWORD"):
+        raise RuntimeError(
+            "BMUIPASS must be set to a strong non-default password before starting. "
+            "Set BMUIPASS=<strong password> (or BMINSECURE_DEFAULT_PASSWORD=1 for "
+            "local development only)."
+        )
+
+
 def _client_ip(request: Request) -> str:
     """Resolve real client IP honouring X-Forwarded-For when behind a trusted
     reverse proxy. Set BMTRUSTEDPROXYHOPS >= 1 to read the header."""
@@ -413,6 +436,8 @@ async def _scan_cleanup_loop() -> None:
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     global _sync_client, _shared_executor, _cleanup_task
+    # FIX(P0#1): refuse to start with an unset / default BMUIPASS.
+    _validate_startup_security()
     # FIX(P1#9): one sync client for the whole process, connection pooled.
     _sync_client = httpx.Client(
         timeout=TIMEOUT,
