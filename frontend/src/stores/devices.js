@@ -86,7 +86,7 @@ export const useDevicesStore = defineStore('devices', () => {
     const notice = useNoticeStore()
     loading.value = true
     try {
-      const [devPage, numPage, allNumPage, groupList] = await Promise.all([
+      const [devPage, numPage, groupList] = await Promise.all([
         fetchDevicesPage({
           page: devicesPage.value,
           pageSize: devicesPageSize.value,
@@ -98,11 +98,6 @@ export const useDevicesStore = defineStore('devices', () => {
           pageSize: numbersPageSize.value,
           q: searchText.value.trim()
         }),
-        // Unfiltered, server-max-sized page so the sender dropdown
-        // shows every SIM regardless of pagination / search filter.
-        // 1000 matches DEVICES_MAX_PAGE_SIZE on the backend; anything
-        // larger triggers a 422 and breaks the whole Promise.all.
-        fetchNumbersPage({ page: 1, pageSize: 1000 }),
         fetchDeviceGroups()
       ])
       devices.value = devPage.items
@@ -117,9 +112,21 @@ export const useDevicesStore = defineStore('devices', () => {
       numbersPageSize.value = numPage.pageSize
       numbersPages.value = numPage.pages
 
-      allNumbers.value = allNumPage.items
-
       groups.value = groupList
+
+      // FIX(P2#7, Devin Review #8): the unfiltered SIM list for the
+      // sender dropdown is fetched outside the critical Promise.all so a
+      // failure (e.g. an operator setting BMDEVICESMAXPAGESIZE below the
+      // page size we ask for, or a transient backend error) only loses
+      // the dropdown -- it doesn't blank the whole dashboard. The page
+      // size matches the backend default cap.
+      try {
+        const allNumPage = await fetchNumbersPage({ page: 1, pageSize: 1000 })
+        allNumbers.value = allNumPage.items
+      } catch {
+        // Leave the previous list in place; the dropdown still works
+        // with stale-but-non-empty data better than empty data.
+      }
     } catch (e) {
       if (!(e && e.response && e.response.status === 401)) {
         notice.set('获取数据失败，请检查网络连接', 'err')
