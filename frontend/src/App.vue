@@ -72,6 +72,16 @@ const { scanning } = storeToRefs(scanStore)
 // the legacy `{ text, type }` shape.
 const notice = computed(() => ({ text: noticeText.value, type: noticeType.value }))
 
+// FIX(P2#7, Devin Review #8): the select-all checkbox's checked /
+// indeterminate state must reflect *current page* membership to stay
+// consistent with toggleSelectAll(), which only acts on the visible
+// page. Without this, selecting page 1 (100/100 items) and paginating
+// to page 2 would leave the header checkbox visually fully-checked
+// even though no item on page 2 is selected.
+const currentPageSelectedCount = computed(
+  () => devices.value.filter(d => selectedIds.value.includes(d.id)).length
+)
+
 // `loading` is the shared "something is in flight" spinner used by every
 // modal and toolbar button. It still lives in App.vue because a handful
 // of unmoved workflows (SMS, dial, OTA, WiFi, config IO, detail/SIM)
@@ -718,8 +728,8 @@ function updateDetailSim(field, value) {
       <StatsGrid
         :online="onlineCount"
         :offline="offlineCount"
-        :total="devices.length"
-        :sim-count="numbers.length"
+        :total="devicesStore.devicesTotal"
+        :sim-count="devicesStore.numbersTotal"
       />
 
       <MessagePanel
@@ -753,13 +763,13 @@ function updateDetailSim(field, value) {
 
       <div class="select-bar">
         <label class="select-all-label">
-          <span :class="['checkbox', { checked: selectedCount > 0 && selectedCount === filteredDevices.length }]">
-            {{ selectedCount > 0 && selectedCount === filteredDevices.length ? '✓' : (selectedCount > 0 ? '−' : '') }}
+          <span :class="['checkbox', { checked: currentPageSelectedCount > 0 && currentPageSelectedCount === filteredDevices.length }]">
+            {{ currentPageSelectedCount > 0 && currentPageSelectedCount === filteredDevices.length ? '✓' : (currentPageSelectedCount > 0 ? '−' : '') }}
           </span>
           <input
             type="checkbox"
-            :checked="selectedCount === filteredDevices.length && filteredDevices.length > 0"
-            :indeterminate="selectedCount > 0 && selectedCount < filteredDevices.length"
+            :checked="currentPageSelectedCount === filteredDevices.length && filteredDevices.length > 0"
+            :indeterminate="currentPageSelectedCount > 0 && currentPageSelectedCount < filteredDevices.length"
             @change="toggleSelectAll"
             style="display: none"
           />
