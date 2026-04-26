@@ -47,14 +47,18 @@ function cancel() {
   dialogStore._resolveConfirm(false)
 }
 
+// FIX(P2#6, Devin Review #7): Esc is intercepted globally because it
+// unambiguously means "cancel". Enter is intentionally NOT handled here:
+// the confirm button is auto-focused on open, and the browser's native
+// Enter-on-focused-button behaviour means Enter still confirms for the
+// happy path. If the user Tabs to Cancel and presses Enter, the native
+// button activation correctly cancels instead -- a global Enter handler
+// would have stolen that and confirmed the destructive action.
 function onKeydown(e) {
   if (!confirmState.value) return
   if (e.key === 'Escape') {
     e.preventDefault()
     cancel()
-  } else if (e.key === 'Enter') {
-    e.preventDefault()
-    confirm()
   }
 }
 
