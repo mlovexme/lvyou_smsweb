@@ -1139,26 +1139,49 @@ def health():
     return {"status": "ok", "message": "Board LAN Hub API is running"}
 
 
+# FIX(P1#7): bound list endpoints. Previously page_size=0 (default) returned
+# every row in one shot; with even a few hundred devices this dominates the
+# dashboard refresh time and copies the entire table into memory. Default
+# now caps at BMDEVICESPAGESIZE (500), and clients must opt into paginated
+# windows by passing page_size explicitly.
+DEVICES_DEFAULT_PAGE_SIZE = int(os.environ.get("BMDEVICESPAGESIZE", "500"))
+DEVICES_MAX_PAGE_SIZE     = int(os.environ.get("BMDEVICESMAXPAGESIZE", "1000"))
+
+
 @app.get("/api/devices")
-def apidevices(page: int = Query(1, ge=1), page_size: int = Query(0, ge=0, le=500), db: Session = Depends(get_db)):
+def apidevices(
+    page: int = Query(1, ge=1),
+    page_size: int = Query(DEVICES_DEFAULT_PAGE_SIZE, ge=1, le=DEVICES_MAX_PAGE_SIZE),
+    db: Session = Depends(get_db),
+):
     query = db.query(Device).order_by(Device.created.desc(), Device.id.desc())
-    if page_size > 0:
-        total = query.count()
-        items = query.offset((page - 1) * page_size).limit(page_size).all()
-        return {"items": [_device_to_dict(d) for d in items], "total": total, "page": page,
-                "page_size": page_size, "pages": (total + page_size - 1) // page_size}
-    return [_device_to_dict(d) for d in query.all()]
+    total = query.count()
+    items = query.offset((page - 1) * page_size).limit(page_size).all()
+    return {
+        "items":     [_device_to_dict(d) for d in items],
+        "total":     total,
+        "page":      page,
+        "page_size": page_size,
+        "pages":     (total + page_size - 1) // page_size if total else 0,
+    }
 
 
 @app.get("/api/numbers")
-def apinumbers(page: int = Query(1, ge=1), page_size: int = Query(0, ge=0, le=500), db: Session = Depends(get_db)):
+def apinumbers(
+    page: int = Query(1, ge=1),
+    page_size: int = Query(DEVICES_DEFAULT_PAGE_SIZE, ge=1, le=DEVICES_MAX_PAGE_SIZE),
+    db: Session = Depends(get_db),
+):
     all_nums = getallnumbers(db)
-    if page_size > 0:
-        total = len(all_nums)
-        start = (page - 1) * page_size
-        return {"items": all_nums[start:start + page_size], "total": total, "page": page,
-                "page_size": page_size, "pages": (total + page_size - 1) // page_size}
-    return all_nums
+    total = len(all_nums)
+    start = (page - 1) * page_size
+    return {
+        "items":     all_nums[start:start + page_size],
+        "total":     total,
+        "page":      page,
+        "page_size": page_size,
+        "pages":     (total + page_size - 1) // page_size if total else 0,
+    }
 
 
 @app.get("/api/devices/{devid}/detail")
@@ -1652,20 +1675,31 @@ def api_batch_forward(req: BatchForwardReq, db: Session = Depends(get_db)):
     return {"results": results}
 
 
+# FIX(P1#8): user-supplied regex on /api/devices/batch/config/{preview,write}
+# was previously evaluated by the stdlib `re` module which has no timeout,
+# so a pathological pattern like (a+)+ on a 500 KB input could pin a worker
+# thread for minutes and deadlock the shared executor. Use the third-party
+# `regex` module (PyPI: regex) which supports a per-call timeout that aborts
+# catastrophic backtracking with a TimeoutError.
+import regex as _user_regex  # noqa: E402
+
+REGEX_TIMEOUT = float(os.environ.get("BMUSERREGEXTIMEOUT", "1.0"))
+
+
 def _apply_regex(config: str, pattern: str, replacement: str, flags_str: str) -> Optional[str]:
     try:
         flags = 0
         for f in flags_str.lower():
             if f == "i":
-                flags |= re.IGNORECASE
+                flags |= _user_regex.IGNORECASE
             elif f == "m":
-                flags |= re.MULTILINE
+                flags |= _user_regex.MULTILINE
             elif f == "s":
-                flags |= re.DOTALL
+                flags |= _user_regex.DOTALL
             elif f.strip():
                 return None
-        return re.sub(pattern, replacement, config, flags=flags)
-    except re.error:
+        return _user_regex.sub(pattern, replacement, config, flags=flags, timeout=REGEX_TIMEOUT)
+    except (_user_regex.error, TimeoutError):
         return None
 
 

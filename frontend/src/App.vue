@@ -213,6 +213,12 @@ async function refresh() {
     const data = await fetchDashboard()
     devices.value = data.devices
     numbers.value = data.numbers
+    // FIX(P1#7): warn the operator when the device list was capped by the
+    // server-side pagination window so they aren't silently working with a
+    // partial view.
+    if (data.devicesTotal && data.devicesTotal > data.devices.length) {
+      setNotice(`设备总数 ${data.devicesTotal}，仅显示前 ${data.devices.length} 条；请缩小过滤范围`, 'info')
+    }
   } catch (e) {
     if (!(e && e.response && e.response.status === 401)) {
       setNotice('获取数据失败，请检查网络连接', 'err')

@@ -13,16 +13,24 @@ export function healthApi() {
   return api.get('/api/health')
 }
 
+// FIX(P1#7): /api/devices and /api/numbers now always return a paginated
+// {items, total, page, page_size} envelope. The Array.isArray branches keep
+// the SPA forward-compatible with older bundled backends, but new builds
+// will always hit the object branch.
 export async function fetchDashboard() {
   const [devicesResp, numbersResp] = await Promise.all([
-    api.get('/api/devices'),
-    api.get('/api/numbers')
+    api.get('/api/devices', { params: { page_size: 1000 } }),
+    api.get('/api/numbers', { params: { page_size: 1000 } })
   ])
   const devData = devicesResp.data
   const numData = numbersResp.data
+  const devices = Array.isArray(devData) ? devData : (devData.items || [])
+  const numbers = Array.isArray(numData) ? numData : (numData.items || [])
   return {
-    devices: Array.isArray(devData) ? devData : (devData.items || []),
-    numbers: Array.isArray(numData) ? numData : (numData.items || [])
+    devices,
+    numbers,
+    devicesTotal: Array.isArray(devData) ? devices.length : (devData.total || devices.length),
+    numbersTotal: Array.isArray(numData) ? numbers.length : (numData.total || numbers.length)
   }
 }
 
