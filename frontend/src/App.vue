@@ -56,6 +56,7 @@ const { text: noticeText, type: noticeType } = storeToRefs(noticeStore)
 const {
   devices,
   numbers,
+  allNumbers,
   searchText,
   groupFilter,
   selectedIds,
@@ -739,7 +740,7 @@ function updateDetailSim(field, value) {
         v-model:content="content"
         v-model:dial-phone="dialPhone"
         v-model:tts-text="ttsText"
-        :numbers="numbers"
+        :numbers="allNumbers"
         :loading="loading"
         @send="send"
         @dial="dial"

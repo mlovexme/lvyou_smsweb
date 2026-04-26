@@ -1116,22 +1116,29 @@ DEVICES_MAX_PAGE_SIZE     = int(os.environ.get("BMDEVICESMAXPAGESIZE", "1000"))
 # would interact badly with client-side filters: a user could see
 # "0 results" on page 3 of 10 simply because the matching devices fell
 # on other pages.
+def _escape_like(value: str) -> str:
+    # FIX(P2#7, Devin Review #8): SQL LIKE special characters % and _
+    # have to be escaped or a search for an alias like "dev_01" matches
+    # "dev101" / "devX01" too. We pair this with .ilike(..., escape='\\').
+    return value.replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_")
+
+
 def _apply_devices_filter(query, q: str, group: str):
     qval = (q or "").strip().lower()
     if qval:
         # SQLite LIKE is case-insensitive for ASCII by default. Match the
         # same fields the old client-side filter looked at: ip, mac,
         # devId, alias, sim1/sim2 numbers and operators.
-        like = f"%{qval}%"
+        like = f"%{_escape_like(qval)}%"
         query = query.filter(
-            (Device.ip.ilike(like))
-            | (Device.mac.ilike(like))
-            | (Device.devId.ilike(like))
-            | (Device.alias.ilike(like))
-            | (Device.sim1number.ilike(like))
-            | (Device.sim2number.ilike(like))
-            | (Device.sim1operator.ilike(like))
-            | (Device.sim2operator.ilike(like))
+            (Device.ip.ilike(like, escape="\\"))
+            | (Device.mac.ilike(like, escape="\\"))
+            | (Device.devId.ilike(like, escape="\\"))
+            | (Device.alias.ilike(like, escape="\\"))
+            | (Device.sim1number.ilike(like, escape="\\"))
+            | (Device.sim2number.ilike(like, escape="\\"))
+            | (Device.sim1operator.ilike(like, escape="\\"))
+            | (Device.sim2operator.ilike(like, escape="\\"))
         )
     gval = (group or "").strip()
     if gval and gval != "all":

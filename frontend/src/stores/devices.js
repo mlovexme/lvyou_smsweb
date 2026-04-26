@@ -29,6 +29,11 @@ const DEFAULT_PAGE_SIZE = 100
 export const useDevicesStore = defineStore('devices', () => {
   const devices = ref([])
   const numbers = ref([])
+  // FIX(P2#7, Devin Review #8): the sender dropdown in MessagePanel
+  // needs *every* SIM regardless of pagination / search filter so the
+  // user can pick any card to send SMS or dial. We keep a second
+  // unfiltered list, refreshed alongside the paginated number list.
+  const allNumbers = ref([])
   const groups = ref([])
 
   const devicesTotal = ref(0)
@@ -81,7 +86,7 @@ export const useDevicesStore = defineStore('devices', () => {
     const notice = useNoticeStore()
     loading.value = true
     try {
-      const [devPage, numPage, groupList] = await Promise.all([
+      const [devPage, numPage, allNumPage, groupList] = await Promise.all([
         fetchDevicesPage({
           page: devicesPage.value,
           pageSize: devicesPageSize.value,
@@ -93,6 +98,9 @@ export const useDevicesStore = defineStore('devices', () => {
           pageSize: numbersPageSize.value,
           q: searchText.value.trim()
         }),
+        // Unfiltered, large page so the sender dropdown shows every SIM
+        // regardless of what the user typed in the search box.
+        fetchNumbersPage({ page: 1, pageSize: 5000 }),
         fetchDeviceGroups()
       ])
       devices.value = devPage.items
@@ -106,6 +114,8 @@ export const useDevicesStore = defineStore('devices', () => {
       numbersPage.value = numPage.page
       numbersPageSize.value = numPage.pageSize
       numbersPages.value = numPage.pages
+
+      allNumbers.value = allNumPage.items
 
       groups.value = groupList
     } catch (e) {
@@ -238,6 +248,7 @@ export const useDevicesStore = defineStore('devices', () => {
   return {
     devices,
     numbers,
+    allNumbers,
     devicesTotal,
     numbersTotal,
     devicesPage,
