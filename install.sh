@@ -148,14 +148,16 @@ prompt_ui_pass() {
     fi
   fi
 
+  # FIX(P0#2): use read_tty_silent so the password is not echoed to the
+  # terminal / scrollback / tmux log during install.
   while true; do
-    read_tty "请设置 UI 登录密码(至少8位，不能为admin): " pass1
+    read_tty_silent "请设置 UI 登录密码(至少8位，不能为admin): " pass1
     if [[ ${#pass1} -lt 8 || "${pass1}" == "admin" ]]; then
       log_err "密码至少 8 位且不能为 admin"
       continue
     fi
 
-    read_tty "请再次输入 UI 登录密码: " pass2
+    read_tty_silent "请再次输入 UI 登录密码: " pass2
     if [[ "${pass1}" != "${pass2}" ]]; then
       log_err "两次输入不一致"
       continue
