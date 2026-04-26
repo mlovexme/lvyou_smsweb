@@ -1,16 +1,13 @@
 import asyncio
-import socket
-import threading
 import json
 import os
 import re
-import secrets
-import subprocess
+import threading
 import time
 from datetime import datetime
-from ipaddress import ip_address, ip_network, IPv4Network, IPv4Address, IPv6Address
-from typing import Any, Dict, List, Optional, Tuple
+from ipaddress import ip_address, ip_network, IPv4Network
 from itertools import islice
+from typing import Any, Dict, List, Optional, Tuple
 from contextlib import asynccontextmanager
 
 import httpx
@@ -19,9 +16,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse, JSONResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, field_validator
-from sqlalchemy import create_engine, Column, Integer, String, Text, BigInteger, text
-from sqlalchemy.ext.declarative import declarative_base
-from sqlalchemy.orm import sessionmaker, Session
+from sqlalchemy.orm import Session
 
 import concurrent.futures
 import hashlib
@@ -32,99 +27,61 @@ from collections import defaultdict
 from logging.handlers import RotatingFileHandler
 from threading import Lock as _Lock
 
+# FIX(P2#4): leaf modules (config / db / security) own the SQLAlchemy
+# engine, models, token CRUD, SSRF allowlist and network helpers. Routes
+# and middleware stay in this file for now; subsequent PRs can split
+# them into devices/scan/ota/config_io APIRouters.
+from backend.config import (
+    AUTH_COOKIE_NAME,
+    CIDRFALLBACKLIMIT,
+    CONCURRENCY,
+    CONFIG_MAX_CHARS,
+    DBPATH,
+    COOKIE_SAMESITE,
+    COOKIE_SECURE,
+    CSRF_COOKIE_NAME,
+    CSRF_HEADER_NAME,
+    DEFAULTPASS,
+    DEFAULTUSER,
+    FORWARD_METHOD_BASIC,
+    OTA_BATCH_MAX,
+    SCAN_RETRIES,
+    SCAN_RETRY_SLEEP_MS,
+    SCAN_TTL,
+    SMS_MAX_LEN,
+    STATICDIR,
+    TIMEOUT,
+    TOKEN_TTL_SECONDS,
+    UIPASS,
+    UIUSER,
+)
+from backend.db import (
+    Device,
+    SessionLocal,
+    cleanup_expired_tokens as _cleanup_expired_tokens,
+    delete_token as _delete_token,
+    get_db,
+    get_token_record as _get_token_record,
+    issue_token as _issue_token,
+    nowts,
+)
+from backend.security import (
+    client_ip_from_request as _client_ip,
+    get_arp_table as getarptable,
+    guess_ipv4_cidr as guessipv4cidr,
+    is_device_ip_allowed as _is_device_ip_allowed,
+    prewarm_neighbors,
+    tcp_port_open as _tcp_port_open,
+    validate_startup_security as _validate_startup_security,
+)
+
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(name)s: %(message)s")
 logger = logging.getLogger("board-manager")
 logger.setLevel(logging.DEBUG if os.environ.get("BMDEBUG") else logging.INFO)
 
-DBPATH      = os.environ.get("BMDB",      "/opt/board-manager/data/data.db")
-STATICDIR   = os.environ.get("BMSTATIC",  "/opt/board-manager/static")
-DEFAULTUSER = "admin"
-DEFAULTPASS = "admin"
-TIMEOUT            = float(os.environ.get("BMHTTPTIMEOUT",    "5.0"))
-CONCURRENCY        = int(os.environ.get("BMSCANCONCURRENCY", "64"))
-TCP_CONCURRENCY    = int(os.environ.get("BMTCPCONCURRENCY",  "128"))
-TCP_TIMEOUT        = float(os.environ.get("BMTCPTIMEOUT",    "0.3"))
-CIDRFALLBACKLIMIT  = int(os.environ.get("BMCIDRFALLBACKLIMIT","1024"))
-SCAN_RETRIES       = int(os.environ.get("BMSCANRETRIES",     "3"))
-SCAN_RETRY_SLEEP_MS= int(os.environ.get("BMSCANRETRYSLEEPMS","300"))
-SCAN_TTL           = int(os.environ.get("BMSCANTTL",         str(3600)))
-UIUSER             = os.environ.get("BMUIUSER",  "admin")
-# FIX(P0#1): default to empty so an unset BMUIPASS cannot accidentally allow
-# admin/admin login. Combined with validate_startup_security() below, the
-# server refuses to start unless BMUIPASS is explicitly set to a non-default
-# value (override with BMINSECURE_DEFAULT_PASSWORD=1 for local development).
-UIPASS             = os.environ.get("BMUIPASS",  "")
-# FIX(P1#10): shorten default token lifetime from 8h to 2h. Combined with
-# the SPA moving the token from localStorage to sessionStorage, this caps
-# how long a stolen token (XSS, leaked browser) is useful before the user
-# must re-authenticate. Operators can still override via BMTOKENTTL.
-TOKEN_TTL_SECONDS  = int(os.environ.get("BMTOKENTTL", str(2 * 60 * 60)))
-# FIX(P2#1): cookie-based session + CSRF. The browser SPA now authenticates
-# via an httpOnly cookie (`AUTH_COOKIE_NAME`) which JavaScript cannot read,
-# closing the XSS-driven token theft path. A second non-httpOnly cookie
-# (`CSRF_COOKIE_NAME`) carries a value derived deterministically from the
-# auth token; the SPA echoes it in the X-CSRF-Token header on every state-
-# changing request. A cross-origin attacker cannot read the CSRF cookie
-# (same-origin policy) and so cannot forge the header.
-AUTH_COOKIE_NAME   = os.environ.get("BMAUTHCOOKIE", "board_mgr_auth")
-CSRF_COOKIE_NAME   = os.environ.get("BMCSRFCOOKIE", "board_mgr_csrf")
-CSRF_HEADER_NAME   = "X-CSRF-Token"
-COOKIE_SECURE      = os.environ.get("BMCOOKIESECURE", "").strip().lower() in {"1", "true", "yes", "on"}
-COOKIE_SAMESITE    = (os.environ.get("BMCOOKIESAMESITE", "lax") or "lax").strip().lower()
-if COOKIE_SAMESITE not in ("lax", "strict", "none"):
-    COOKIE_SAMESITE = "lax"
-PREWARM_CONCURRENCY = int(os.environ.get("BMPREWARMCONCURRENCY", "64"))
-OTA_BATCH_MAX      = int(os.environ.get("BMOTABATCHMAX",       "64"))
-CONFIG_MAX_CHARS   = int(os.environ.get("BMCONFIGMAXCHARS",    "524288"))
-TRUSTED_PROXY_HOPS = int(os.environ.get("BMTRUSTEDPROXYHOPS",  "0"))
-
-# FIX(P1#17): magic string -> named constant
-FORWARD_METHOD_BASIC = "99"
-
-Base = declarative_base()
-engine = create_engine(
-    f"sqlite:///{DBPATH}",
-    pool_pre_ping=True, pool_recycle=3600,
-    connect_args={"check_same_thread": False},
-)
-SessionLocal = sessionmaker(autocommit=False, autoflush=False, bind=engine)
-
-
-class Device(Base):
-    __tablename__ = "devices"
-    id           = Column(Integer, primary_key=True, index=True)
-    devId        = Column(String(128), unique=True, nullable=True)
-    grp          = Column(String(64),  default="auto")
-    ip           = Column(String(45),  unique=True, index=True, nullable=False)
-    mac          = Column(String(32),  unique=True, nullable=True, default=None)
-    user         = Column(String(64),  default="")
-    passwd       = Column(String(64),  default="")
-    status       = Column(String(32),  default="unknown")
-    lastSeen     = Column(BigInteger,  default=0)
-    sim1number   = Column(String(32),  default="")
-    sim1operator = Column(String(64),  default="")
-    sim1signal   = Column(Integer,     default=0)
-    sim2number   = Column(String(32),  default="")
-    sim2operator = Column(String(64),  default="")
-    sim2signal   = Column(Integer,     default=0)
-    token        = Column(Text,        default="")
-    # FIX(N3): dedicated column for firmware version so OTA check never
-    # overwrites the device's stable identifier (devId).
-    firmware_version = Column(String(64), default="")
-    alias        = Column(String(128), default="")
-    created      = Column(String(32),  default="")
-
-
-# FIX(P0#2): persist auth tokens to SQLite so that multiple uvicorn processes
-# (e.g. the v4 and v6 listeners) share the same session store.
-class AuthToken(Base):
-    __tablename__ = "auth_tokens"
-    token    = Column(String(128), primary_key=True)
-    username = Column(String(64),  default="")
-    exp      = Column(BigInteger,  default=0, index=True)
-
-
-Base.metadata.create_all(bind=engine)
+# Constants, engine, and ORM models now live in backend.config / backend.db
+# and are re-imported above. The names are unchanged so the rest of this
+# module reads identically.
 
 
 class RateLimiter:
@@ -201,8 +158,7 @@ _login_limiter_user = RateLimiter(
 # FIX(N5): OTA batch rate limiter (per user), prevents using it as an internal reboot-storm
 _ota_limiter  = RateLimiter(int(os.environ.get("BMOTARATELIMIT",  "4")), float(os.environ.get("BMOTARATEPERIOD",  "60")))
 
-PHONE_RE    = re.compile(r"^\+?[0-9]{5,15}$")
-SMS_MAX_LEN = int(os.environ.get("BMSMSMAXLEN", "500"))
+PHONE_RE = re.compile(r"^\+?[0-9]{5,15}$")
 
 
 def _validate_phone(phone: str) -> str:
@@ -408,88 +364,10 @@ def _cleanup_old_scans() -> None:
             _active_scans.pop(sid, None)
 
 
-def _run_migrations():
-    """Idempotent ALTER TABLE migrations for columns added across versions."""
-    alters = [
-        ("devices", "token",            "TEXT DEFAULT ''"),
-        ("devices", "sim1signal",       "INTEGER DEFAULT 0"),
-        ("devices", "sim2signal",       "INTEGER DEFAULT 0"),
-        ("devices", "firmware_version", "VARCHAR(64) DEFAULT ''"),
-    ]
-    with engine.connect() as conn:
-        for table, col, coltype in alters:
-            rows = conn.execute(text(f"PRAGMA table_info({table})")).fetchall()
-            cols = [r[1] for r in rows]
-            if col not in cols:
-                conn.execute(text(f"ALTER TABLE {table} ADD COLUMN {col} {coltype}"))
-        conn.execute(text("UPDATE devices SET mac = NULL WHERE mac = ''"))
-        conn.commit()
-
-
-_run_migrations()
-
-
-def get_db():
-    db = SessionLocal()
-    try:
-        yield db
-    finally:
-        db.close()
-
-
-def nowts() -> int:
-    return int(time.time())
-
-
-# ── Token persistence (SQLite-backed, shared across processes) ───────────────
-def _cleanup_expired_tokens() -> None:
-    try:
-        with engine.begin() as conn:
-            conn.execute(text("DELETE FROM auth_tokens WHERE exp <= :n"), {"n": nowts()})
-    except Exception:
-        logger.debug("token cleanup failed", exc_info=True)
-
-
-def _get_token_record(token: str) -> Optional[Dict[str, Any]]:
-    if not token:
-        return None
-    try:
-        with engine.connect() as conn:
-            row = conn.execute(
-                text("SELECT username, exp FROM auth_tokens WHERE token = :t"),
-                {"t": token},
-            ).first()
-            if not row:
-                return None
-            return {"username": row[0] or "", "exp": int(row[1] or 0)}
-    except Exception:
-        logger.debug("token lookup failed", exc_info=True)
-        return None
-
-
-def _insert_token(token: str, username: str, exp: int) -> None:
-    with engine.begin() as conn:
-        conn.execute(
-            text("INSERT OR REPLACE INTO auth_tokens(token, username, exp) VALUES(:t, :u, :e)"),
-            {"t": token, "u": username, "e": exp},
-        )
-
-
-def _delete_token(token: str) -> None:
-    if not token:
-        return
-    try:
-        with engine.begin() as conn:
-            conn.execute(text("DELETE FROM auth_tokens WHERE token = :t"), {"t": token})
-    except Exception:
-        logger.debug("token delete failed", exc_info=True)
-
-
-def _issue_token(username: str) -> str:
-    _cleanup_expired_tokens()
-    token = secrets.token_urlsafe(32)
-    _insert_token(token, username, nowts() + TOKEN_TTL_SECONDS)
-    return token
+# ``_run_migrations`` runs at import time inside backend.db; ``get_db``,
+# ``nowts``, the token CRUD and ``_issue_token`` are imported above and
+# remain available under their original ``_-prefixed`` names for the
+# rest of this file.
 
 
 def _extract_bearer_token(request: Request) -> str:
@@ -573,47 +451,10 @@ def _check_login_credentials(username: str, password: str) -> bool:
     return hmac.compare_digest(username, UIUSER) and hmac.compare_digest(password, UIPASS)
 
 
-def _env_truthy(name: str) -> bool:
-    return os.environ.get(name, "").strip().lower() in {"1", "true", "yes", "on"}
-
-
-def _validate_startup_security() -> None:
-    """FIX(P0#1): refuse to start with an empty or default BMUIPASS unless the
-    operator explicitly opts into the insecure default for local development.
-
-    This guard is what makes the documented `BMUIPASS` requirement actually
-    enforceable -- without it, an unset env var silently falls back to
-    admin/admin, which is exactly the regression that prompted this fix."""
-    if (not UIPASS or UIPASS == "admin") and not _env_truthy("BMINSECURE_DEFAULT_PASSWORD"):
-        raise RuntimeError(
-            "BMUIPASS must be set to a strong non-default password before starting. "
-            "Set BMUIPASS=<strong password> (or BMINSECURE_DEFAULT_PASSWORD=1 for "
-            "local development only)."
-        )
-    # FIX(P2#1): SameSite=None is rejected by every modern browser unless
-    # the cookie is also Secure. Catch this misconfiguration at startup
-    # rather than silently dropping the auth cookie at request time.
-    if COOKIE_SAMESITE == "none" and not COOKIE_SECURE:
-        raise RuntimeError(
-            "BMCOOKIESAMESITE=none requires BMCOOKIESECURE=1; browsers will "
-            "reject SameSite=None cookies sent over plain HTTP."
-        )
-
-
-def _client_ip(request: Request) -> str:
-    """Resolve real client IP honouring X-Forwarded-For when behind a trusted
-    reverse proxy. Set BMTRUSTEDPROXYHOPS >= 1 to read the header."""
-    if TRUSTED_PROXY_HOPS > 0:
-        xff = request.headers.get("x-forwarded-for", "") or request.headers.get("X-Forwarded-For", "")
-        if xff:
-            parts = [p.strip() for p in xff.split(",") if p.strip()]
-            if parts:
-                idx = max(0, len(parts) - TRUSTED_PROXY_HOPS)
-                return parts[idx]
-        real = request.headers.get("x-real-ip", "") or request.headers.get("X-Real-IP", "")
-        if real:
-            return real.strip()
-    return request.client.host if request.client else "unknown"
+# `_validate_startup_security` and `_client_ip` are imported from
+# ``backend.security`` and remain available under their original names.
+# The cookie SameSite/Secure consistency check that lived here previously
+# now also lives in ``backend.security.validate_startup_security``.
 
 
 # ── Shared httpx client + executor (managed by lifespan) ─────────────────────
@@ -773,190 +614,14 @@ def uiindex():
     return FileResponse(index_path)
 
 
-# FIX(P0#5): never invoke a shell. Each helper below feeds argv directly to
-# subprocess; no user-controllable values are passed.
-def _run(argv: List[str], timeout: float = 3.0) -> str:
-    return subprocess.check_output(argv, stderr=subprocess.DEVNULL, text=True, timeout=timeout).strip()
-
-
-def guessipv4cidr() -> str:
-    try:
-        route_text = _run(["ip", "-4", "route", "show", "default"])
-        for line in route_text.splitlines():
-            match = re.search(r"dev\s+(\S+)", line)
-            if not match:
-                continue
-            iface = match.group(1)
-            addr_text = _run(["ip", "-4", "addr", "show", "dev", iface])
-            for addr_line in addr_text.splitlines():
-                m = re.search(r"inet\s+(\d+\.\d+\.\d+\.\d+/\d+)", addr_line)
-                if m:
-                    net = ip_network(m.group(1), strict=False)
-                    if isinstance(net, IPv4Network):
-                        return f"{net.network_address}/{net.prefixlen}"
-            break
-    except Exception:
-        pass
-    try:
-        txt = _run(["ip", "-o", "-4", "addr", "show"])
-        for line in txt.splitlines():
-            parts = line.strip().split()
-            if len(parts) < 4:
-                continue
-            iface, cidr = parts[1], parts[3]
-            if iface == "lo":
-                continue
-            net = ip_network(cidr, strict=False)
-            if isinstance(net, IPv4Network):
-                return f"{net.network_address}/{net.prefixlen}"
-    except Exception:
-        pass
-    return "192.168.1.0/24"
-
-
-# FIX(P0#4): cache the local network list with a short TTL so the SSRF
-# allow-list check does not fork `ip` for every outbound device request.
-_LOCAL_NETS_CACHE: Tuple[float, List[IPv4Network]] = (0.0, [])
-_LOCAL_NETS_CACHE_TTL = float(os.environ.get("BMLOCALNETSCACHETTL", "60"))
-_LOCAL_NETS_LOCK = _Lock()
-
-
-def _local_ipv4_networks() -> List[IPv4Network]:
-    global _LOCAL_NETS_CACHE
-    now = time.time()
-    cached_at, cached = _LOCAL_NETS_CACHE
-    if cached and now - cached_at < _LOCAL_NETS_CACHE_TTL:
-        return cached
-    with _LOCAL_NETS_LOCK:
-        cached_at, cached = _LOCAL_NETS_CACHE
-        if cached and now - cached_at < _LOCAL_NETS_CACHE_TTL:
-            return cached
-        nets: List[IPv4Network] = []
-        try:
-            txt = _run(["ip", "-o", "-4", "addr", "show"])
-            for line in txt.splitlines():
-                parts = line.strip().split()
-                if len(parts) < 4:
-                    continue
-                iface, cidr = parts[1], parts[3]
-                if iface == "lo":
-                    continue
-                try:
-                    net = ip_network(cidr, strict=False)
-                    if isinstance(net, IPv4Network):
-                        nets.append(net)
-                except Exception:
-                    continue
-        except Exception:
-            pass
-        _LOCAL_NETS_CACHE = (now, nets)
-        return nets
-
-
-def _is_device_ip_allowed(ip: str) -> bool:
-    """FIX(P0#4): SSRF allow-list. Two layers:
-      1. Must be RFC1918 private / IPv6 ULA, never loopback/link-local/etc.
-      2. Must fall inside a network the host itself is attached to (so a
-         10.0.0.0/8 device cannot be scanned from a 192.168.x host).
-
-    Layer 2 is best-effort: when the host has no IPv4 networks (e.g. test
-    environment) it is skipped rather than failing closed, which would
-    block legitimate scans before any network is configured.
-    """
-    try:
-        addr = ip_address(ip)
-    except Exception:
-        return False
-    if isinstance(addr, IPv4Address):
-        if addr.is_loopback or addr.is_link_local or addr.is_multicast or addr.is_unspecified or addr.is_reserved:
-            return False
-        if not addr.is_private:
-            return False
-        nets = _local_ipv4_networks()
-        if not nets:
-            return True
-        for net in nets:
-            if addr in net:
-                return True
-        return False
-    if isinstance(addr, IPv6Address):
-        if addr.is_loopback or addr.is_link_local or addr.is_multicast or addr.is_unspecified or addr.is_reserved:
-            return False
-        return addr.is_private or addr.is_site_local
-    return False
-
-
+# Network-level helpers (SSRF allowlist, ARP table, prewarm, TCP probe,
+# default CIDR guess) live in ``backend.security``; only the thin
+# HTTP-aware wrapper that converts allowlist failures into HTTPException
+# stays here so it can use FastAPI's exception machinery.
 def _ensure_device_ip_allowed(ip: str) -> None:
     if not _is_device_ip_allowed(ip):
         logger.warning("blocked outbound device request to non-whitelisted ip: %s", ip)
         raise HTTPException(status_code=400, detail="设备 IP 不在允许的内网范围内")
-
-
-def getarptable() -> Dict[str, str]:
-    out: Dict[str, str] = {}
-    try:
-        with open("/proc/net/arp") as handle:
-            for line in handle.readlines()[1:]:
-                parts = line.split()
-                if len(parts) >= 4:
-                    ip  = parts[0].strip()
-                    mac = parts[3].strip().upper()
-                    if mac and mac != "00:00:00:00:00:00" and ":" in mac:
-                        out[ip] = mac
-    except Exception:
-        pass
-    try:
-        txt = subprocess.check_output(["ip", "neigh", "show"], text=True, stderr=subprocess.DEVNULL)
-        for line in txt.splitlines():
-            parts = line.split()
-            if len(parts) >= 5 and "lladdr" in parts:
-                ip  = parts[0].strip()
-                mac = parts[parts.index("lladdr") + 1].strip().upper()
-                if mac and mac != "00:00:00:00:00:00" and ":" in mac:
-                    out[ip] = mac
-    except Exception:
-        pass
-    return out
-
-
-# FIX(P1#11): cap concurrent ping subprocesses, avoiding 1024 fork()s at once.
-def prewarm_neighbors(net: IPv4Network) -> None:
-    try:
-        hosts = [str(host) for host in islice(net.hosts(), CIDRFALLBACKLIMIT)]
-        sem = threading.Semaphore(max(1, PREWARM_CONCURRENCY))
-        deadline = time.time() + 8
-
-        def _ping(ip_str: str) -> None:
-            if time.time() >= deadline:
-                return
-            with sem:
-                try:
-                    subprocess.run(
-                        ["ping", "-c", "1", "-W", "1", ip_str],
-                        stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
-                        timeout=max(0.5, deadline - time.time()),
-                    )
-                except Exception:
-                    pass
-
-        threads: List[threading.Thread] = []
-        for ip in hosts:
-            t = threading.Thread(target=_ping, args=(ip,), daemon=True)
-            t.start()
-            threads.append(t)
-        for t in threads:
-            t.join(timeout=max(0.1, deadline - time.time()))
-        time.sleep(0.2)
-    except Exception:
-        pass
-
-
-def _tcp_port_open(ip: str, port: int = 80) -> bool:
-    try:
-        with socket.create_connection((ip, port), timeout=TCP_TIMEOUT):
-            return True
-    except Exception:
-        return False
 
 
 def _bm_op_from_sta(sta: str) -> str:
