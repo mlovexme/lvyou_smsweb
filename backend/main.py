@@ -560,10 +560,11 @@ def _configure_cors(_app: FastAPI) -> None:
 
 # FIX(P0#1): expose /api/health so container/compose HEALTHCHECK works without
 # needing a Bearer token. The endpoint returns only liveness info.
-# FIX(P2#8): /metrics is also outside the bearer flow so Prometheus can
-# scrape it. Access is gated by BMMETRICS_TOKEN below; if the env var is
-# unset we leave /metrics off entirely rather than expose it open.
-_PUBLIC_PATHS = {"/", "/api/login", "/api/health", "/metrics"}
+# FIX(P2#8): /metrics is added to this set inside _wire_prometheus()
+# only when BMMETRICS_TOKEN is set. Leaving it out when metrics are
+# disabled means the main token_auth_mw still rejects requests instead
+# of letting them fall through to a confusing 404.
+_PUBLIC_PATHS = {"/", "/api/login", "/api/health"}
 
 # FIX(P2#1): methods that mutate state and therefore must carry a valid
 # X-CSRF-Token header when the caller authenticated via a cookie. Bearer-
@@ -621,6 +622,7 @@ def _wire_prometheus(_app: FastAPI) -> None:
     metrics_token = os.environ.get("BMMETRICS_TOKEN", "").strip()
     if not metrics_token:
         return  # opt-in only; absent env var = no /metrics endpoint
+    _PUBLIC_PATHS.add("/metrics")
 
     try:
         from prometheus_client import Counter, Gauge
