@@ -446,11 +446,9 @@ async def lifespan(app: FastAPI):
     )
     # FIX(P1#10): one ThreadPoolExecutor for all batch endpoints / scans.
     _shared_executor = concurrent.futures.ThreadPoolExecutor(max_workers=max(CONCURRENCY, 32))
-    app.state.http_client = httpx.AsyncClient(
-        timeout=TIMEOUT,
-        limits=httpx.Limits(max_connections=CONCURRENCY, max_keepalive_connections=20),
-        follow_redirects=False,
-    )
+    # FIX(P1#6): the previous AsyncClient on app.state was created but never
+    # used by any endpoint. Removed to avoid leaking connections at shutdown
+    # and to make it obvious which client is the production code path.
     app.state.sync_http_client = _sync_client
     app.state.executor = _shared_executor
     # FIX(P1#12): periodic cleanup task for finished scan tasks and expired tokens.
@@ -464,10 +462,6 @@ async def lifespan(app: FastAPI):
                 await _cleanup_task
             except (asyncio.CancelledError, Exception):
                 pass
-        try:
-            await app.state.http_client.aclose()
-        except Exception:
-            pass
         try:
             _sync_client.close()
         except Exception:
@@ -502,9 +496,6 @@ def _configure_cors(_app: FastAPI) -> None:
     )
 
 
-_configure_cors(app)
-
-
 # FIX(P0#1): expose /api/health so container/compose HEALTHCHECK works without
 # needing a Bearer token. The endpoint returns only liveness info.
 _PUBLIC_PATHS = {"/", "/api/login", "/api/health"}
@@ -513,13 +504,22 @@ _PUBLIC_PATHS = {"/", "/api/login", "/api/health"}
 @app.middleware("http")
 async def token_auth_mw(request: Request, call_next):
     path = request.url.path
-    if path.startswith("/static/") or path in _PUBLIC_PATHS:
+    if request.method == "OPTIONS" or path.startswith("/static/") or path in _PUBLIC_PATHS:
         return await call_next(request)
     try:
         _require_token(request)
     except HTTPException as exc:
         return _unauthorized_json(exc.detail)
     return await call_next(request)
+
+
+# FIX(P1#5): register CORS *after* the token middleware so it is the
+# outermost wrapper. Starlette runs middlewares in last-added-first order,
+# so by adding CORS after the @app.middleware("http") decorator above we
+# guarantee that 401 responses returned directly from the auth middleware
+# still carry Access-Control-Allow-* headers (otherwise the browser hides
+# them as a generic network error and the SPA cannot prompt for re-login).
+_configure_cors(app)
 
 
 os.makedirs(STATICDIR, exist_ok=True)
@@ -575,29 +575,55 @@ def guessipv4cidr() -> str:
     return "192.168.1.0/24"
 
 
+# FIX(P0#4): cache the local network list with a short TTL so the SSRF
+# allow-list check does not fork `ip` for every outbound device request.
+_LOCAL_NETS_CACHE: Tuple[float, List[IPv4Network]] = (0.0, [])
+_LOCAL_NETS_CACHE_TTL = float(os.environ.get("BMLOCALNETSCACHETTL", "60"))
+_LOCAL_NETS_LOCK = _Lock()
+
+
 def _local_ipv4_networks() -> List[IPv4Network]:
-    nets: List[IPv4Network] = []
-    try:
-        txt = _run(["ip", "-o", "-4", "addr", "show"])
-        for line in txt.splitlines():
-            parts = line.strip().split()
-            if len(parts) < 4:
-                continue
-            iface, cidr = parts[1], parts[3]
-            if iface == "lo":
-                continue
-            try:
-                net = ip_network(cidr, strict=False)
-                if isinstance(net, IPv4Network):
-                    nets.append(net)
-            except Exception:
-                continue
-    except Exception:
-        pass
-    return nets
+    global _LOCAL_NETS_CACHE
+    now = time.time()
+    cached_at, cached = _LOCAL_NETS_CACHE
+    if cached and now - cached_at < _LOCAL_NETS_CACHE_TTL:
+        return cached
+    with _LOCAL_NETS_LOCK:
+        cached_at, cached = _LOCAL_NETS_CACHE
+        if cached and now - cached_at < _LOCAL_NETS_CACHE_TTL:
+            return cached
+        nets: List[IPv4Network] = []
+        try:
+            txt = _run(["ip", "-o", "-4", "addr", "show"])
+            for line in txt.splitlines():
+                parts = line.strip().split()
+                if len(parts) < 4:
+                    continue
+                iface, cidr = parts[1], parts[3]
+                if iface == "lo":
+                    continue
+                try:
+                    net = ip_network(cidr, strict=False)
+                    if isinstance(net, IPv4Network):
+                        nets.append(net)
+                except Exception:
+                    continue
+        except Exception:
+            pass
+        _LOCAL_NETS_CACHE = (now, nets)
+        return nets
 
 
 def _is_device_ip_allowed(ip: str) -> bool:
+    """FIX(P0#4): SSRF allow-list. Two layers:
+      1. Must be RFC1918 private / IPv6 ULA, never loopback/link-local/etc.
+      2. Must fall inside a network the host itself is attached to (so a
+         10.0.0.0/8 device cannot be scanned from a 192.168.x host).
+
+    Layer 2 is best-effort: when the host has no IPv4 networks (e.g. test
+    environment) it is skipped rather than failing closed, which would
+    block legitimate scans before any network is configured.
+    """
     try:
         addr = ip_address(ip)
     except Exception:
@@ -605,7 +631,15 @@ def _is_device_ip_allowed(ip: str) -> bool:
     if isinstance(addr, IPv4Address):
         if addr.is_loopback or addr.is_link_local or addr.is_multicast or addr.is_unspecified or addr.is_reserved:
             return False
-        return addr.is_private
+        if not addr.is_private:
+            return False
+        nets = _local_ipv4_networks()
+        if not nets:
+            return True
+        for net in nets:
+            if addr in net:
+                return True
+        return False
     if isinstance(addr, IPv6Address):
         if addr.is_loopback or addr.is_link_local or addr.is_multicast or addr.is_unspecified or addr.is_reserved:
             return False
