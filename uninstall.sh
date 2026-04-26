@@ -84,6 +84,17 @@ else
   log_warn "/usr/local/bin/lvyou 不存在，跳过"
 fi
 
+title "删除服务用户"
+
+# FIX(P0#3): clean up the dedicated 'board-manager' system account that
+# install.sh creates so re-installs start from a clean slate.
+if id -u board-manager >/dev/null 2>&1; then
+  userdel board-manager 2>/dev/null && log_info "已删除用户 board-manager" || log_warn "删除用户 board-manager 失败"
+fi
+if getent group board-manager >/dev/null 2>&1; then
+  groupdel board-manager 2>/dev/null && log_info "已删除组 board-manager" || log_warn "删除组 board-manager 失败"
+fi
+
 title "完成"
 
 log_info "卸载完成"

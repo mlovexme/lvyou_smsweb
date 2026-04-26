@@ -11,8 +11,32 @@ EnvironmentFile={{CONFIG_FILE}}
 ExecStart={{APPDIR}}/venv/bin/python -m uvicorn backend.main:app --app-dir {{APPDIR}}/app --host 0.0.0.0 --port {{APIPORT}}
 Restart=always
 RestartSec=2
-User=root
-Group=root
+
+# FIX(P0#3): drop root. The service only needs to read /proc/net/arp,
+# run `ip neigh show` (both available to any user), and `ping` (which has
+# cap_net_raw on its binary on every supported distro). install.sh creates
+# a dedicated 'board-manager' system user before enabling this unit.
+User=board-manager
+Group=board-manager
+
+# FIX(P0#3): defense-in-depth process hardening. ReadWritePaths is the
+# only writable area outside /tmp, AF_NETLINK is required for `ip` to
+# open its rtnetlink socket, and the rest just remove avenues for
+# privilege escalation should the python service be compromised.
+NoNewPrivileges=true
+ProtectSystem=strict
+ProtectHome=true
+ReadWritePaths={{APPDIR}}/data
+PrivateTmp=true
+ProtectKernelTunables=true
+ProtectKernelModules=true
+ProtectControlGroups=true
+RestrictAddressFamilies=AF_INET AF_INET6 AF_UNIX AF_NETLINK
+LockPersonality=true
+RestrictRealtime=true
+RestrictNamespaces=true
+SystemCallArchitectures=native
+
 StandardOutput=journal
 StandardError=journal
 

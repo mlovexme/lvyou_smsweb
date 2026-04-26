@@ -13,9 +13,29 @@ APPDIR="/opt/board-manager"
 APIPORT="8000"
 UIPASS=""
 CONFIG_FILE="/etc/board-manager.conf"
+SERVICE_USER="board-manager"
+SERVICE_GROUP="board-manager"
 OS_FAMILY="debian"
 
 source "${ROOT_DIR}/scripts/common.sh"
+
+# FIX(P1#9): parse the config file by hand instead of `source`-ing it. The
+# config file is consumed by both this shell installer and systemd's
+# EnvironmentFile= directive; systemd does not perform shell parameter
+# expansion, so the config file is written as plain KEY=VALUE without
+# quotes. Sourcing it from bash would re-introduce the very escape
+# problems N8 was trying to avoid (e.g. a password containing $ or `).
+read_config_value() {
+  local key="$1"
+  local file="$2"
+  [[ -f "${file}" ]] || return 0
+  local line
+  line="$(grep -E "^${key}=" "${file}" 2>/dev/null | tail -n 1)"
+  if [[ -z "${line}" ]]; then
+    return 0
+  fi
+  printf '%s' "${line#${key}=}"
+}
 
 usage() {
   cat <<EOF
@@ -105,11 +125,15 @@ install_system_deps() {
 }
 
 load_existing_config() {
-  if [[ -f "${CONFIG_FILE}" ]]; then
-    # shellcheck disable=SC1090
-    source "${CONFIG_FILE}" || true
-    UIPASS="${BMUIPASS:-${UIPASS}}"
+  # FIX(P1#9): never source the config file -- parse known keys explicitly
+  # so passwords containing shell metacharacters cannot be evaluated.
+  if [[ ! -f "${CONFIG_FILE}" ]]; then
+    return
   fi
+  local v
+  v="$(read_config_value APPDIR  "${CONFIG_FILE}")"; [[ -n "${v}" ]] && APPDIR="${v}"
+  v="$(read_config_value APIPORT "${CONFIG_FILE}")"; [[ -n "${v}" ]] && APIPORT="${v}"
+  v="$(read_config_value BMUIPASS "${CONFIG_FILE}")"; [[ -n "${v}" ]] && UIPASS="${v}"
 }
 
 prompt_api_port() {
@@ -179,14 +203,46 @@ check_port() {
 }
 
 write_config() {
+  # FIX(P1#9): write KEY=VALUE without quotes so the same file can be both
+  # sourced (well, parsed) by this script and consumed by systemd's
+  # EnvironmentFile= directive on every supported systemd version (older
+  # systemd <249 does not strip surrounding quotes, which used to leave
+  # BMUIPASS literally containing the quote characters and broke login).
+  # Newlines in passwords are already prevented by `read -rs`, so the only
+  # invariant we still need is "value runs to end of line".
   mkdir -p "$(dirname "${CONFIG_FILE}")"
+  umask 077
   cat > "${CONFIG_FILE}" <<EOF
-APPDIR="${APPDIR}"
-APIPORT="${APIPORT}"
-BMUIUSER="admin"
-BMUIPASS="${UIPASS}"
+APPDIR=${APPDIR}
+APIPORT=${APIPORT}
+BMUIUSER=admin
+BMUIPASS=${UIPASS}
 EOF
-  chmod 600 "${CONFIG_FILE}"
+  chmod 640 "${CONFIG_FILE}"
+  chown root:"${SERVICE_GROUP}" "${CONFIG_FILE}" 2>/dev/null || chmod 600 "${CONFIG_FILE}"
+}
+
+ensure_service_user() {
+  # FIX(P0#3): create a dedicated unprivileged system account for the
+  # board-manager service so the systemd unit can drop User=root.
+  if ! getent group "${SERVICE_GROUP}" >/dev/null 2>&1; then
+    groupadd --system "${SERVICE_GROUP}"
+  fi
+  if ! id -u "${SERVICE_USER}" >/dev/null 2>&1; then
+    useradd --system --no-create-home --shell /usr/sbin/nologin \
+            --gid "${SERVICE_GROUP}" \
+            --home-dir "${APPDIR}" "${SERVICE_USER}"
+  fi
+}
+
+set_service_ownership() {
+  # FIX(P0#3): make the writable data dir owned by the service user, keep
+  # the rest read-only via root ownership so a compromised process cannot
+  # tamper with its own code.
+  chown -R root:"${SERVICE_GROUP}" "${APPDIR}"
+  chmod 0755 "${APPDIR}"
+  chown -R "${SERVICE_USER}:${SERVICE_GROUP}" "${APPDIR}/data"
+  chmod 0750 "${APPDIR}/data"
 }
 
 install_backend() {
@@ -398,9 +454,14 @@ case "${cmd}" in
     prompt_api_port
     prompt_ui_pass
     check_port "${APIPORT}" || exit 1
-    write_config
+    # FIX(P0#3): create the dedicated unprivileged service account before
+    # the systemd unit references it, then chown the install tree once
+    # everything is in place.
+    ensure_service_user
     install_backend
     install_frontend
+    write_config
+    set_service_ownership
     install_services
     install_cli
     show_result

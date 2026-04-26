@@ -30,11 +30,28 @@ need_root() {
   fi
 }
 
-load_config() {
-  if [[ -f "${CONFIG_FILE}" ]]; then
-    # shellcheck disable=SC1090
-    source "${CONFIG_FILE}"
+# FIX(P1#9): parse the config by hand instead of `source`-ing it. The file
+# is now systemd-EnvironmentFile-compatible (plain KEY=VALUE without
+# quotes) and may legally contain shell metacharacters in BMUIPASS.
+read_config_value() {
+  local key="$1"
+  local file="${CONFIG_FILE}"
+  [[ -f "${file}" ]] || return 0
+  local line
+  line="$(grep -E "^${key}=" "${file}" 2>/dev/null | tail -n 1)"
+  if [[ -z "${line}" ]]; then
+    return 0
   fi
+  printf '%s' "${line#${key}=}"
+}
+
+load_config() {
+  [[ -f "${CONFIG_FILE}" ]] || return
+  local v
+  v="$(read_config_value APPDIR)";   [[ -n "${v}" ]] && APPDIR="${v}"
+  v="$(read_config_value APIPORT)";  [[ -n "${v}" ]] && APIPORT="${v}"
+  v="$(read_config_value BMUIUSER)"; [[ -n "${v}" ]] && BMUIUSER="${v}"
+  v="$(read_config_value BMUIPASS)"; [[ -n "${v}" ]] && BMUIPASS="${v}"
 }
 
 show_banner() {
@@ -109,7 +126,11 @@ do_status() {
 do_config() {
   log_title "配置文件内容"
   if [[ -f "${CONFIG_FILE}" ]]; then
-    cat "${CONFIG_FILE}"
+    # FIX(P1#9): mask BMUIPASS so 'lvyou config' on a shared terminal does
+    # not display the UI password in plaintext. Use sed -E with a single
+    # capture so the substitution works whether or not the value was
+    # historically quoted.
+    sed -E 's/^(BMUIPASS=).*/\1********/' "${CONFIG_FILE}"
     printf '\n'
   else
     log_err "配置文件不存在: ${CONFIG_FILE}"
@@ -144,15 +165,17 @@ do_change_password() {
   local tmp_file
   tmp_file="$(mktemp)"
   if [[ -f "${CONFIG_FILE}" ]]; then
+    # FIX(P1#9): write KEY=VALUE without quotes so systemd <249 also
+    # consumes BMUIPASS correctly.
     awk -v new_pass="${pass1}" '
       BEGIN { written = 0 }
-      /^BMUIPASS=/ { printf "BMUIPASS=\"%s\"\n", new_pass; written = 1; next }
+      /^BMUIPASS=/ { printf "BMUIPASS=%s\n", new_pass; written = 1; next }
       /^UIPASS=/ { next }
       { print }
-      END { if (!written) printf "BMUIPASS=\"%s\"\n", new_pass }
+      END { if (!written) printf "BMUIPASS=%s\n", new_pass }
     ' "${CONFIG_FILE}" > "${tmp_file}"
   else
-    printf 'BMUIPASS="%s"\n' "${pass1}" > "${tmp_file}"
+    printf 'BMUIPASS=%s\n' "${pass1}" > "${tmp_file}"
   fi
   chmod --reference="${CONFIG_FILE}" "${tmp_file}" 2>/dev/null || chmod 600 "${tmp_file}"
   mv -f "${tmp_file}" "${CONFIG_FILE}"
@@ -203,9 +226,9 @@ do_change_port() {
   tmp_cfg="$(mktemp)"
   awk -v new_port="${new_port}" '
     BEGIN { written = 0 }
-    /^APIPORT=/ { printf "APIPORT=\"%s\"\n", new_port; written = 1; next }
+    /^APIPORT=/ { printf "APIPORT=%s\n", new_port; written = 1; next }
     { print }
-    END { if (!written) printf "APIPORT=\"%s\"\n", new_port }
+    END { if (!written) printf "APIPORT=%s\n", new_port }
   ' "${CONFIG_FILE}" > "${tmp_cfg}"
   chmod --reference="${CONFIG_FILE}" "${tmp_cfg}" 2>/dev/null || chmod 600 "${tmp_cfg}"
   mv -f "${tmp_cfg}" "${CONFIG_FILE}"
