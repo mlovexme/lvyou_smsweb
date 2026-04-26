@@ -272,8 +272,11 @@ def _setup_audit_logger() -> logging.Logger:
         return aud
 
     stream = logging.StreamHandler()
+    # FIX(P2#3): include ip + result so the journal-readable form does
+    # not drop the structured fields the JSON formatter persists.
     stream.setFormatter(logging.Formatter(
-        "audit ts=%(asctime)s action=%(audit_action)s user=%(audit_user)s detail=%(audit_detail)s"
+        "audit ts=%(asctime)s action=%(audit_action)s user=%(audit_user)s "
+        "ip=%(audit_ip)s result=%(audit_result)s detail=%(audit_detail)s"
     ))
     aud.addHandler(stream)
 
