@@ -1,0 +1,79 @@
+name: Lint
+
+# FIX(P2#11): CI gate that previously did not exist. The repo was building
+# multi-arch docker images on every push but had no static analysis, so a
+# regression like backend/app/ being defined and never imported (entire
+# package was dead code) shipped without anyone noticing. Ruff is fast
+# enough to run on every PR and catches the most common Python mistakes
+# (unused imports, undefined names, syntax errors) before review.
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+jobs:
+  python-lint:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Install ruff
+        run: pip install ruff==0.6.9
+
+      - name: ruff check (lint)
+        run: ruff check backend/
+
+      - name: Compile-check backend
+        run: |
+          python -m compileall -q backend/
+
+  python-import-graph:
+    # Make sure the canonical entrypoint actually imports cleanly.
+    # If backend/app/ is reintroduced, this job ensures `backend.main`
+    # still loads without it -- catching the "modular refactor that was
+    # never wired up" failure mode that prompted P0#1.
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Install backend deps
+        run: pip install -r backend/requirements.txt
+
+      - name: Import smoke-test
+        env:
+          BMINSECURE_DEFAULT_PASSWORD: "1"
+          BMDB: "/tmp/import-smoke.db"
+          BMSTATIC: "/tmp/import-smoke-static"
+        run: |
+          mkdir -p /tmp/import-smoke-static
+          python -c "import importlib; m = importlib.import_module('backend.main'); print('imported', m.__file__)"
+
+  frontend-build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+
+      - name: Install pnpm
+        run: npm install -g pnpm@9
+
+      - name: Install deps
+        working-directory: frontend
+        run: pnpm install --frozen-lockfile
+
+      - name: Build (vue-tsc + vite)
+        working-directory: frontend
+        run: pnpm run build

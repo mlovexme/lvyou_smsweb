@@ -2,5 +2,9 @@ fastapi>=0.104.0
 uvicorn[standard]>=0.24.0
 httpx>=0.25.0
 sqlalchemy>=2.0.0
-aiosqlite>=0.19.0
 pydantic>=2.0.0
+# FIX(P1#8): user-supplied regex on /api/devices/batch/config/{preview,write}
+# needs a per-call timeout to defuse ReDoS. The third-party `regex` module
+# (PyPI `regex`) is API-compatible with stdlib re and adds a `timeout=`
+# argument that aborts catastrophic backtracking.
+regex>=2024.0.0

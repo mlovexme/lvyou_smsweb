@@ -1,12 +1,12 @@
-name: Manual Push v3.4.0
+name: Manual Push v5.0
 
 on:
   workflow_dispatch:
     inputs:
       version:
-        description: 'Version tag (e.g., v3.4.0)'
+        description: 'Version tag (e.g., v5.0)'
         required: true
-        default: 'v3.4.0'
+        default: 'v5.0'
         type: string
 
 env:

@@ -28,6 +28,20 @@ read_tty() {
   fi
 }
 
+# FIX(P0#2): suppress terminal echo while reading secrets (-s). Without this,
+# install.sh's prompt_ui_pass would print the new BMUIPASS in plaintext on
+# the operator's terminal, scrollback buffer and any tee/screen/tmux logs.
+read_tty_silent() {
+  local prompt="$1"
+  local varname="$2"
+  if [[ -t 0 ]]; then
+    read -rs -p "${prompt}" "${varname}"
+  else
+    read -rs -p "${prompt}" "${varname}" < /dev/tty
+  fi
+  printf '\n'
+}
+
 check_dependencies() {
   for cmd in python3 npm systemctl sed; do
     if ! command -v "${cmd}" >/dev/null 2>&1; then

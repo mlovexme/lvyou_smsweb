@@ -36,8 +36,8 @@ logger.setLevel(logging.DEBUG if os.environ.get("BMDEBUG") else logging.INFO)
 
 DBPATH      = os.environ.get("BMDB",      "/opt/board-manager/data/data.db")
 STATICDIR   = os.environ.get("BMSTATIC",  "/opt/board-manager/static")
-DEFAULTUSER = os.environ.get("BMDEVUSER", "admin")
-DEFAULTPASS = os.environ.get("BMDEVPASS", "admin")
+DEFAULTUSER = "admin"
+DEFAULTPASS = "admin"
 TIMEOUT            = float(os.environ.get("BMHTTPTIMEOUT",    "5.0"))
 CONCURRENCY        = int(os.environ.get("BMSCANCONCURRENCY", "64"))
 TCP_CONCURRENCY    = int(os.environ.get("BMTCPCONCURRENCY",  "128"))
@@ -47,8 +47,16 @@ SCAN_RETRIES       = int(os.environ.get("BMSCANRETRIES",     "3"))
 SCAN_RETRY_SLEEP_MS= int(os.environ.get("BMSCANRETRYSLEEPMS","300"))
 SCAN_TTL           = int(os.environ.get("BMSCANTTL",         str(3600)))
 UIUSER             = os.environ.get("BMUIUSER",  "admin")
-UIPASS             = os.environ.get("BMUIPASS",  "admin")
-TOKEN_TTL_SECONDS  = int(os.environ.get("BMTOKENTTL", str(8 * 60 * 60)))
+# FIX(P0#1): default to empty so an unset BMUIPASS cannot accidentally allow
+# admin/admin login. Combined with validate_startup_security() below, the
+# server refuses to start unless BMUIPASS is explicitly set to a non-default
+# value (override with BMINSECURE_DEFAULT_PASSWORD=1 for local development).
+UIPASS             = os.environ.get("BMUIPASS",  "")
+# FIX(P1#10): shorten default token lifetime from 8h to 2h. Combined with
+# the SPA moving the token from localStorage to sessionStorage, this caps
+# how long a stolen token (XSS, leaked browser) is useful before the user
+# must re-authenticate. Operators can still override via BMTOKENTTL.
+TOKEN_TTL_SECONDS  = int(os.environ.get("BMTOKENTTL", str(2 * 60 * 60)))
 PREWARM_CONCURRENCY = int(os.environ.get("BMPREWARMCONCURRENCY", "64"))
 OTA_BATCH_MAX      = int(os.environ.get("BMOTABATCHMAX",       "64"))
 CONFIG_MAX_CHARS   = int(os.environ.get("BMCONFIGMAXCHARS",    "524288"))
@@ -72,7 +80,7 @@ class Device(Base):
     devId        = Column(String(128), unique=True, nullable=True)
     grp          = Column(String(64),  default="auto")
     ip           = Column(String(45),  unique=True, index=True, nullable=False)
-    mac          = Column(String(32),  unique=True, nullable=True, default="")
+    mac          = Column(String(32),  unique=True, nullable=True, default=None)
     user         = Column(String(64),  default="")
     passwd       = Column(String(64),  default="")
     status       = Column(String(32),  default="unknown")
@@ -260,6 +268,7 @@ def _run_migrations():
             cols = [r[1] for r in rows]
             if col not in cols:
                 conn.execute(text(f"ALTER TABLE {table} ADD COLUMN {col} {coltype}"))
+        conn.execute(text("UPDATE devices SET mac = NULL WHERE mac = ''"))
         conn.commit()
 
 
@@ -357,6 +366,25 @@ def _check_login_credentials(username: str, password: str) -> bool:
     return hmac.compare_digest(username, UIUSER) and hmac.compare_digest(password, UIPASS)
 
 
+def _env_truthy(name: str) -> bool:
+    return os.environ.get(name, "").strip().lower() in {"1", "true", "yes", "on"}
+
+
+def _validate_startup_security() -> None:
+    """FIX(P0#1): refuse to start with an empty or default BMUIPASS unless the
+    operator explicitly opts into the insecure default for local development.
+
+    This guard is what makes the documented `BMUIPASS` requirement actually
+    enforceable -- without it, an unset env var silently falls back to
+    admin/admin, which is exactly the regression that prompted this fix."""
+    if (not UIPASS or UIPASS == "admin") and not _env_truthy("BMINSECURE_DEFAULT_PASSWORD"):
+        raise RuntimeError(
+            "BMUIPASS must be set to a strong non-default password before starting. "
+            "Set BMUIPASS=<strong password> (or BMINSECURE_DEFAULT_PASSWORD=1 for "
+            "local development only)."
+        )
+
+
 def _client_ip(request: Request) -> str:
     """Resolve real client IP honouring X-Forwarded-For when behind a trusted
     reverse proxy. Set BMTRUSTEDPROXYHOPS >= 1 to read the header."""
@@ -412,6 +440,8 @@ async def _scan_cleanup_loop() -> None:
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     global _sync_client, _shared_executor, _cleanup_task
+    # FIX(P0#1): refuse to start with an unset / default BMUIPASS.
+    _validate_startup_security()
     # FIX(P1#9): one sync client for the whole process, connection pooled.
     _sync_client = httpx.Client(
         timeout=TIMEOUT,
@@ -420,11 +450,9 @@ async def lifespan(app: FastAPI):
     )
     # FIX(P1#10): one ThreadPoolExecutor for all batch endpoints / scans.
     _shared_executor = concurrent.futures.ThreadPoolExecutor(max_workers=max(CONCURRENCY, 32))
-    app.state.http_client = httpx.AsyncClient(
-        timeout=TIMEOUT,
-        limits=httpx.Limits(max_connections=CONCURRENCY, max_keepalive_connections=20),
-        follow_redirects=False,
-    )
+    # FIX(P1#6): the previous AsyncClient on app.state was created but never
+    # used by any endpoint. Removed to avoid leaking connections at shutdown
+    # and to make it obvious which client is the production code path.
     app.state.sync_http_client = _sync_client
     app.state.executor = _shared_executor
     # FIX(P1#12): periodic cleanup task for finished scan tasks and expired tokens.
@@ -438,10 +466,6 @@ async def lifespan(app: FastAPI):
                 await _cleanup_task
             except (asyncio.CancelledError, Exception):
                 pass
-        try:
-            await app.state.http_client.aclose()
-        except Exception:
-            pass
         try:
             _sync_client.close()
         except Exception:
@@ -476,9 +500,6 @@ def _configure_cors(_app: FastAPI) -> None:
     )
 
 
-_configure_cors(app)
-
-
 # FIX(P0#1): expose /api/health so container/compose HEALTHCHECK works without
 # needing a Bearer token. The endpoint returns only liveness info.
 _PUBLIC_PATHS = {"/", "/api/login", "/api/health"}
@@ -487,13 +508,22 @@ _PUBLIC_PATHS = {"/", "/api/login", "/api/health"}
 @app.middleware("http")
 async def token_auth_mw(request: Request, call_next):
     path = request.url.path
-    if path.startswith("/static/") or path in _PUBLIC_PATHS:
+    if request.method == "OPTIONS" or path.startswith("/static/") or path in _PUBLIC_PATHS:
         return await call_next(request)
     try:
         _require_token(request)
     except HTTPException as exc:
         return _unauthorized_json(exc.detail)
     return await call_next(request)
+
+
+# FIX(P1#5): register CORS *after* the token middleware so it is the
+# outermost wrapper. Starlette runs middlewares in last-added-first order,
+# so by adding CORS after the @app.middleware("http") decorator above we
+# guarantee that 401 responses returned directly from the auth middleware
+# still carry Access-Control-Allow-* headers (otherwise the browser hides
+# them as a generic network error and the SPA cannot prompt for re-login).
+_configure_cors(app)
 
 
 os.makedirs(STATICDIR, exist_ok=True)
@@ -549,34 +579,55 @@ def guessipv4cidr() -> str:
     return "192.168.1.0/24"
 
 
+# FIX(P0#4): cache the local network list with a short TTL so the SSRF
+# allow-list check does not fork `ip` for every outbound device request.
+_LOCAL_NETS_CACHE: Tuple[float, List[IPv4Network]] = (0.0, [])
+_LOCAL_NETS_CACHE_TTL = float(os.environ.get("BMLOCALNETSCACHETTL", "60"))
+_LOCAL_NETS_LOCK = _Lock()
+
+
 def _local_ipv4_networks() -> List[IPv4Network]:
-    nets: List[IPv4Network] = []
-    try:
-        txt = _run(["ip", "-o", "-4", "addr", "show"])
-        for line in txt.splitlines():
-            parts = line.strip().split()
-            if len(parts) < 4:
-                continue
-            iface, cidr = parts[1], parts[3]
-            if iface == "lo":
-                continue
-            try:
-                net = ip_network(cidr, strict=False)
-                if isinstance(net, IPv4Network):
-                    nets.append(net)
-            except Exception:
-                continue
-    except Exception:
-        pass
-    return nets
+    global _LOCAL_NETS_CACHE
+    now = time.time()
+    cached_at, cached = _LOCAL_NETS_CACHE
+    if cached and now - cached_at < _LOCAL_NETS_CACHE_TTL:
+        return cached
+    with _LOCAL_NETS_LOCK:
+        cached_at, cached = _LOCAL_NETS_CACHE
+        if cached and now - cached_at < _LOCAL_NETS_CACHE_TTL:
+            return cached
+        nets: List[IPv4Network] = []
+        try:
+            txt = _run(["ip", "-o", "-4", "addr", "show"])
+            for line in txt.splitlines():
+                parts = line.strip().split()
+                if len(parts) < 4:
+                    continue
+                iface, cidr = parts[1], parts[3]
+                if iface == "lo":
+                    continue
+                try:
+                    net = ip_network(cidr, strict=False)
+                    if isinstance(net, IPv4Network):
+                        nets.append(net)
+                except Exception:
+                    continue
+        except Exception:
+            pass
+        _LOCAL_NETS_CACHE = (now, nets)
+        return nets
 
 
-# FIX(P0#3): whitelist before any outbound request to a device. A device.ip
-# value either comes from scanning a local subnet or from operator input; in
-# neither case should the backend be tricked into fetching public / metadata
-# endpoints on its behalf. We accept only private addresses and — more
-# strictly — IPs that fall in one of the local interface subnets.
 def _is_device_ip_allowed(ip: str) -> bool:
+    """FIX(P0#4): SSRF allow-list. Two layers:
+      1. Must be RFC1918 private / IPv6 ULA, never loopback/link-local/etc.
+      2. Must fall inside a network the host itself is attached to (so a
+         10.0.0.0/8 device cannot be scanned from a 192.168.x host).
+
+    Layer 2 is best-effort: when the host has no IPv4 networks (e.g. test
+    environment) it is skipped rather than failing closed, which would
+    block legitimate scans before any network is configured.
+    """
     try:
         addr = ip_address(ip)
     except Exception:
@@ -860,7 +911,7 @@ def upsertdevice(db: Session, ip: str, mac: str, user: str, pw: str, grp: Option
         if grp is not None and str(grp).strip():
             device.grp = grp
         device.ip          = ip
-        device.mac         = mac if mac else device.mac
+        device.mac         = mac if mac else (device.mac or None)
         device.user        = user
         device.passwd      = pw
         device.status      = "online"
@@ -876,7 +927,7 @@ def upsertdevice(db: Session, ip: str, mac: str, user: str, pw: str, grp: Option
     else:
         device = Device(
             devId=devid, grp=(grp if grp is not None and str(grp).strip() else "auto"),
-            ip=ip, mac=(mac or ""), user=user, passwd=pw, status="online", lastSeen=nowts(),
+            ip=ip, mac=mac, user=user, passwd=pw, status="online", lastSeen=nowts(),
             sim1number=sim1num, sim1operator=sim1op, sim1signal=sim1sig,
             sim2number=sim2num, sim2operator=sim2op, sim2signal=sim2sig,
             firmware_version=fw_ver,
@@ -889,7 +940,7 @@ def upsertdevice(db: Session, ip: str, mac: str, user: str, pw: str, grp: Option
     except Exception as exc:
         db.rollback()
         logger.warning("upsert %s failed: %s", ip, exc)
-        return {"ip": ip, "error": "数据库写入失败"}
+        return {"ip": ip, "error": f"数据库写入失败: {exc}"}
     db.refresh(device)
     return _device_to_dict(device)
 
@@ -1092,26 +1143,49 @@ def health():
     return {"status": "ok", "message": "Board LAN Hub API is running"}
 
 
+# FIX(P1#7): bound list endpoints. Previously page_size=0 (default) returned
+# every row in one shot; with even a few hundred devices this dominates the
+# dashboard refresh time and copies the entire table into memory. Default
+# now caps at BMDEVICESPAGESIZE (500), and clients must opt into paginated
+# windows by passing page_size explicitly.
+DEVICES_DEFAULT_PAGE_SIZE = int(os.environ.get("BMDEVICESPAGESIZE", "500"))
+DEVICES_MAX_PAGE_SIZE     = int(os.environ.get("BMDEVICESMAXPAGESIZE", "1000"))
+
+
 @app.get("/api/devices")
-def apidevices(page: int = Query(1, ge=1), page_size: int = Query(0, ge=0, le=500), db: Session = Depends(get_db)):
+def apidevices(
+    page: int = Query(1, ge=1),
+    page_size: int = Query(DEVICES_DEFAULT_PAGE_SIZE, ge=1, le=DEVICES_MAX_PAGE_SIZE),
+    db: Session = Depends(get_db),
+):
     query = db.query(Device).order_by(Device.created.desc(), Device.id.desc())
-    if page_size > 0:
-        total = query.count()
-        items = query.offset((page - 1) * page_size).limit(page_size).all()
-        return {"items": [_device_to_dict(d) for d in items], "total": total, "page": page,
-                "page_size": page_size, "pages": (total + page_size - 1) // page_size}
-    return [_device_to_dict(d) for d in query.all()]
+    total = query.count()
+    items = query.offset((page - 1) * page_size).limit(page_size).all()
+    return {
+        "items":     [_device_to_dict(d) for d in items],
+        "total":     total,
+        "page":      page,
+        "page_size": page_size,
+        "pages":     (total + page_size - 1) // page_size if total else 0,
+    }
 
 
 @app.get("/api/numbers")
-def apinumbers(page: int = Query(1, ge=1), page_size: int = Query(0, ge=0, le=500), db: Session = Depends(get_db)):
+def apinumbers(
+    page: int = Query(1, ge=1),
+    page_size: int = Query(DEVICES_DEFAULT_PAGE_SIZE, ge=1, le=DEVICES_MAX_PAGE_SIZE),
+    db: Session = Depends(get_db),
+):
     all_nums = getallnumbers(db)
-    if page_size > 0:
-        total = len(all_nums)
-        start = (page - 1) * page_size
-        return {"items": all_nums[start:start + page_size], "total": total, "page": page,
-                "page_size": page_size, "pages": (total + page_size - 1) // page_size}
-    return all_nums
+    total = len(all_nums)
+    start = (page - 1) * page_size
+    return {
+        "items":     all_nums[start:start + page_size],
+        "total":     total,
+        "page":      page,
+        "page_size": page_size,
+        "pages":     (total + page_size - 1) // page_size if total else 0,
+    }
 
 
 @app.get("/api/devices/{devid}/detail")
@@ -1263,14 +1337,23 @@ def _run_scan_bg(scan_id: str, cidr: str, group: Optional[str], user: str, passw
         db = SessionLocal()
         try:
             saved: List[Dict[str, Any]] = []
+            failed: List[Dict[str, Any]] = []
             for item in state.results:
                 try:
-                    d = upsertdevice(db, item["ip"], item["mac"], user, password, item.get("grp"))
-                    saved.append(d)
+                    d = upsertdevice(db, item["ip"], item["mac"], DEFAULTUSER, DEFAULTPASS, item.get("grp"))
+                    if d.get("error"):
+                        failed.append(d)
+                    else:
+                        saved.append(d)
                 except Exception as exc:
+                    failed.append({"ip": item["ip"], "error": str(exc)})
                     logger.warning("save device %s failed: %s", item["ip"], exc)
             state.set_results(saved)
-            state.set_status("done", f"完成，发现 {len(saved)} 台设备")
+            if failed:
+                failed_text = "；".join(f"{x.get('ip', '')}: {x.get('error', '')}" for x in failed[:3])
+                state.set_status("error", f"发现 {len(saved) + len(failed)} 台，成功添加 {len(saved)} 台，失败 {len(failed)} 台：{failed_text}")
+            else:
+                state.set_status("done", f"完成，发现 {len(saved)} 台设备")
         finally:
             db.close()
     except Exception as exc:
@@ -1596,20 +1679,31 @@ def api_batch_forward(req: BatchForwardReq, db: Session = Depends(get_db)):
     return {"results": results}
 
 
+# FIX(P1#8): user-supplied regex on /api/devices/batch/config/{preview,write}
+# was previously evaluated by the stdlib `re` module which has no timeout,
+# so a pathological pattern like (a+)+ on a 500 KB input could pin a worker
+# thread for minutes and deadlock the shared executor. Use the third-party
+# `regex` module (PyPI: regex) which supports a per-call timeout that aborts
+# catastrophic backtracking with a TimeoutError.
+import regex as _user_regex  # noqa: E402
+
+REGEX_TIMEOUT = float(os.environ.get("BMUSERREGEXTIMEOUT", "1.0"))
+
+
 def _apply_regex(config: str, pattern: str, replacement: str, flags_str: str) -> Optional[str]:
     try:
         flags = 0
         for f in flags_str.lower():
             if f == "i":
-                flags |= re.IGNORECASE
+                flags |= _user_regex.IGNORECASE
             elif f == "m":
-                flags |= re.MULTILINE
+                flags |= _user_regex.MULTILINE
             elif f == "s":
-                flags |= re.DOTALL
+                flags |= _user_regex.DOTALL
             elif f.strip():
                 return None
-        return re.sub(pattern, replacement, config, flags=flags)
-    except re.error:
+        return _user_regex.sub(pattern, replacement, config, flags=flags, timeout=REGEX_TIMEOUT)
+    except (_user_regex.error, TimeoutError):
         return None
 
 

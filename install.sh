@@ -11,18 +11,36 @@ if [[ -d "${ROOT_DIR}/scripts" ]]; then
 fi
 APPDIR="/opt/board-manager"
 APIPORT="8000"
-SCANUSER="admin"
-SCANPASS="admin"
 UIPASS=""
 CONFIG_FILE="/etc/board-manager.conf"
+SERVICE_USER="board-manager"
+SERVICE_GROUP="board-manager"
 OS_FAMILY="debian"
 
 source "${ROOT_DIR}/scripts/common.sh"
 
+# FIX(P1#9): parse the config file by hand instead of `source`-ing it. The
+# config file is consumed by both this shell installer and systemd's
+# EnvironmentFile= directive; systemd does not perform shell parameter
+# expansion, so the config file is written as plain KEY=VALUE without
+# quotes. Sourcing it from bash would re-introduce the very escape
+# problems N8 was trying to avoid (e.g. a password containing $ or `).
+read_config_value() {
+  local key="$1"
+  local file="$2"
+  [[ -f "${file}" ]] || return 0
+  local line
+  line="$(grep -E "^${key}=" "${file}" 2>/dev/null | tail -n 1)"
+  if [[ -z "${line}" ]]; then
+    return 0
+  fi
+  printf '%s' "${line#${key}=}"
+}
+
 usage() {
   cat <<EOF
 用法:
-  sudo ./install.sh install [--port 8000] [--scan-user admin] [--scan-pass admin] [--ui-pass 123456]
+  sudo ./install.sh install [--port 8000] [--ui-pass 至少8位强密码]
   sudo ./install.sh status
   sudo ./install.sh restart
   sudo ./install.sh logs
@@ -107,10 +125,15 @@ install_system_deps() {
 }
 
 load_existing_config() {
-  if [[ -f "${CONFIG_FILE}" ]]; then
-    # shellcheck disable=SC1090
-    source "${CONFIG_FILE}" || true
+  # FIX(P1#9): never source the config file -- parse known keys explicitly
+  # so passwords containing shell metacharacters cannot be evaluated.
+  if [[ ! -f "${CONFIG_FILE}" ]]; then
+    return
   fi
+  local v
+  v="$(read_config_value APPDIR  "${CONFIG_FILE}")"; [[ -n "${v}" ]] && APPDIR="${v}"
+  v="$(read_config_value APIPORT "${CONFIG_FILE}")"; [[ -n "${v}" ]] && APIPORT="${v}"
+  v="$(read_config_value BMUIPASS "${CONFIG_FILE}")"; [[ -n "${v}" ]] && UIPASS="${v}"
 }
 
 prompt_api_port() {
@@ -138,7 +161,6 @@ prompt_api_port() {
   done
 }
 
-# ========== 修正后的 prompt_ui_pass（保留已有密码选项）==========
 prompt_ui_pass() {
   if [[ -n "${UIPASS}" ]]; then
     local keep_old=""
@@ -150,14 +172,16 @@ prompt_ui_pass() {
     fi
   fi
 
+  # FIX(P0#2): use read_tty_silent so the password is not echoed to the
+  # terminal / scrollback / tmux log during install.
   while true; do
-    read_tty "请设置 UI 登录密码(至少6位): " pass1
-    if [[ ${#pass1} -lt 6 ]]; then
-      log_err "密码至少 6 位"
+    read_tty_silent "请设置 UI 登录密码(至少8位，不能为admin): " pass1
+    if [[ ${#pass1} -lt 8 || "${pass1}" == "admin" ]]; then
+      log_err "密码至少 8 位且不能为 admin"
       continue
     fi
 
-    read_tty "请再次输入 UI 登录密码: " pass2
+    read_tty_silent "请再次输入 UI 登录密码: " pass2
     if [[ "${pass1}" != "${pass2}" ]]; then
       log_err "两次输入不一致"
       continue
@@ -167,7 +191,6 @@ prompt_ui_pass() {
     break
   done
 }
-# ========================================================
 
 check_port() {
   local port="$1"
@@ -180,15 +203,46 @@ check_port() {
 }
 
 write_config() {
+  # FIX(P1#9): write KEY=VALUE without quotes so the same file can be both
+  # sourced (well, parsed) by this script and consumed by systemd's
+  # EnvironmentFile= directive on every supported systemd version (older
+  # systemd <249 does not strip surrounding quotes, which used to leave
+  # BMUIPASS literally containing the quote characters and broke login).
+  # Newlines in passwords are already prevented by `read -rs`, so the only
+  # invariant we still need is "value runs to end of line".
   mkdir -p "$(dirname "${CONFIG_FILE}")"
+  umask 077
   cat > "${CONFIG_FILE}" <<EOF
-APPDIR="${APPDIR}"
-APIPORT="${APIPORT}"
-SCANUSER="${SCANUSER}"
-SCANPASS="${SCANPASS}"
-UIPASS="${UIPASS}"
+APPDIR=${APPDIR}
+APIPORT=${APIPORT}
+BMUIUSER=admin
+BMUIPASS=${UIPASS}
 EOF
-  chmod 600 "${CONFIG_FILE}"
+  chmod 640 "${CONFIG_FILE}"
+  chown root:"${SERVICE_GROUP}" "${CONFIG_FILE}" 2>/dev/null || chmod 600 "${CONFIG_FILE}"
+}
+
+ensure_service_user() {
+  # FIX(P0#3): create a dedicated unprivileged system account for the
+  # board-manager service so the systemd unit can drop User=root.
+  if ! getent group "${SERVICE_GROUP}" >/dev/null 2>&1; then
+    groupadd --system "${SERVICE_GROUP}"
+  fi
+  if ! id -u "${SERVICE_USER}" >/dev/null 2>&1; then
+    useradd --system --no-create-home --shell /usr/sbin/nologin \
+            --gid "${SERVICE_GROUP}" \
+            --home-dir "${APPDIR}" "${SERVICE_USER}"
+  fi
+}
+
+set_service_ownership() {
+  # FIX(P0#3): make the writable data dir owned by the service user, keep
+  # the rest read-only via root ownership so a compromised process cannot
+  # tamper with its own code.
+  chown -R root:"${SERVICE_GROUP}" "${APPDIR}"
+  chmod 0755 "${APPDIR}"
+  chown -R "${SERVICE_USER}:${SERVICE_GROUP}" "${APPDIR}/data"
+  chmod 0750 "${APPDIR}/data"
 }
 
 install_backend() {
@@ -204,7 +258,9 @@ install_backend() {
   "${APPDIR}/venv/bin/pip" install --upgrade pip
   "${APPDIR}/venv/bin/pip" install -r "${ROOT_DIR}/backend/requirements.txt"
 
-  cp "${ROOT_DIR}/backend/main.py" "${APPDIR}/app/main.py"
+  rm -rf "${APPDIR}/app"
+  mkdir -p "${APPDIR}/app"
+  cp -a "${ROOT_DIR}/backend" "${APPDIR}/app/backend"
 }
 
 install_frontend() {
@@ -229,9 +285,7 @@ render_service() {
   sed \
     -e "s|{{APPDIR}}|${APPDIR}|g" \
     -e "s|{{APIPORT}}|${APIPORT}|g" \
-    -e "s|{{SCANUSER}}|${SCANUSER}|g" \
-    -e "s|{{SCANPASS}}|${SCANPASS}|g" \
-    -e "s|{{UIPASS}}|${UIPASS}|g" \
+    -e "s|{{CONFIG_FILE}}|${CONFIG_FILE}|g" \
     "${template}" > "${output}"
 }
 
@@ -319,7 +373,7 @@ show_result() {
   log_info "程序目录: ${APPDIR}"
   log_info "配置文件: ${CONFIG_FILE}"
   log_info "服务端口: ${APIPORT}"
-  log_info "扫描账号: ${SCANUSER}"
+  log_info "设备账号: admin"
 
   if [[ -n "${ip}" ]]; then
     log_info "推荐访问地址: http://${ip}:${APIPORT}/"
@@ -382,14 +436,6 @@ while [[ $# -gt 0 ]]; do
       CLI_PORT_SET=1
       shift 2
       ;;
-    --scan-user)
-      SCANUSER="$2"
-      shift 2
-      ;;
-    --scan-pass)
-      SCANPASS="$2"
-      shift 2
-      ;;
     --ui-pass)
       UIPASS="$2"
       shift 2
@@ -408,9 +454,14 @@ case "${cmd}" in
     prompt_api_port
     prompt_ui_pass
     check_port "${APIPORT}" || exit 1
-    write_config
+    # FIX(P0#3): create the dedicated unprivileged service account before
+    # the systemd unit references it, then chown the install tree once
+    # everything is in place.
+    ensure_service_user
     install_backend
     install_frontend
+    write_config
+    set_service_ownership
     install_services
     install_cli
     show_result

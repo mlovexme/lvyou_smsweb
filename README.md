@@ -57,16 +57,12 @@ sudo bash install.sh logs
 ```bash
 sudo bash install.sh install \
   --port 8000 \
-  --scan-user admin \
-  --scan-pass admin \
   --ui-pass 123456
 ```
 
 | 参数 | 说明 |
 |------|------|
 | `--port` | 服务端口，默认 8000 |
-| `--scan-user` | 设备扫描用户名，默认 admin |
-| `--scan-pass` | 设备扫描密码，默认 admin |
 | `--ui-pass` | UI 登录密码 |
 
 ### 方式二：Docker 安装
@@ -125,7 +121,7 @@ docker-compose -f docker-compose.prod.yml up -d
 启动命令：
 
 ```bash
-docker compose up -d
+BMUIPASS=请替换为强密码 docker compose up -d
 ```
 
 #### 环境变量说明
@@ -134,9 +130,9 @@ docker compose up -d
 |------|--------|------|
 | `SERVER_PORT` | 8000 | 服务端口 |
 | `BMUIUSER` | admin | UI 登录用户名 |
-| `BMUIPASS` | admin | UI 登录密码 |
-| `BMDEVUSER` | admin | 设备扫描用户名 |
-| `BMDEVPASS` | admin | 设备扫描密码 |
+| `BMUIPASS` | 必填 | UI 登录密码；生产环境必须设置 |
+| `BMINSECURE_DEFAULT_PASSWORD` | 0 | 仅本地开发可设为 1 以允许默认/空密码 |
+| 设备账号密码 | admin/admin | 固定使用设备默认账号密码，不需要配置 |
 | `BMHTTPTIMEOUT` | 5.0 | HTTP 超时秒数 |
 | `BMSCANCONCURRENCY` | 64 | 扫描并发数 |
 | `BMTCPCONCURRENCY` | 128 | TCP 端口探测并发数 |
@@ -150,6 +146,7 @@ docker compose up -d
 | `BMOTARATELIMIT` | 4 | OTA 批量操作频率限制（次/分钟） |
 | `BMOTARATEPERIOD` | 60 | OTA 限流窗口（秒） |
 | `BMOTABATCHMAX` | 64 | OTA 批量操作设备数上限 |
+| `BMCONFIGBATCHMAX` | 64 | 批量配置设备数上限 |
 | `BMPREWARMCONCURRENCY` | 64 | 扫描阶段并发 ping 上限 |
 | `BMTRUSTEDPROXYHOPS` | 0 | 信任的反代层数（≥1时用X-Forwarded-For） |
 
@@ -321,6 +318,7 @@ v5.0 是一次重大安全与性能升级，包含 20+ 项修复和优化。
 | `BMOTARATELIMIT` | 4 | OTA 限流次数 |
 | `BMOTARATEPERIOD` | 60 | OTA 限流窗口（秒） |
 | `BMOTABATCHMAX` | 64 | OTA 批量上限 |
+| `BMCONFIGBATCHMAX` | 64 | 批量配置上限 |
 | `BMPREWARMCONCURRENCY` | 64 | 扫描并发 ping 上限 |
 | `BMTRUSTEDPROXYHOPS` | 0 | 信任代理层数 |
 
