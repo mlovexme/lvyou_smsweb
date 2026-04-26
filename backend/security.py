@@ -73,7 +73,9 @@ def guess_ipv4_cidr() -> str:
                         return f"{net.network_address}/{net.prefixlen}"
             break
     except Exception:
-        pass
+        # FIX(P2#12): debug-level so an operator running with -L debug
+        # can see why guess_ipv4_cidr fell through to the second strategy.
+        logger.debug("default-route CIDR detection failed", exc_info=True)
     try:
         txt = run_cmd(["ip", "-o", "-4", "addr", "show"])
         for line in txt.splitlines():
@@ -87,7 +89,10 @@ def guess_ipv4_cidr() -> str:
             if isinstance(net, IPv4Network):
                 return f"{net.network_address}/{net.prefixlen}"
     except Exception:
-        pass
+        # FIX(P2#12): same -- log so the 192.168.1.0/24 fallback is never
+        # silent. Operators have hit "scan finds nothing" because both
+        # detection paths failed and they had no way to know.
+        logger.debug("addr-list CIDR detection failed", exc_info=True)
     return "192.168.1.0/24"
 
 
@@ -123,8 +128,12 @@ def local_ipv4_networks() -> List[IPv4Network]:
                         nets.append(net)
                 except Exception:
                     continue
-        except Exception:
-            pass
+        except Exception as exc:
+            # FIX(P2#12): the silent fallback used to make mis-configured
+            # bridges look like "no local nets" with no diagnostic. Log
+            # at warning level so an operator sees why SSRF layer-2 is
+            # disabled.
+            logger.warning("local IPv4 network discovery failed: %r", exc)
         _LOCAL_NETS_CACHE = (now, nets)
         return nets
 
@@ -222,7 +231,10 @@ def prewarm_neighbors(net: IPv4Network) -> None:
             t.join(timeout=max(0.1, deadline - time.time()))
         time.sleep(0.2)
     except Exception:
-        pass
+        # FIX(P2#12): prewarm best-effort, but log at debug so operators
+        # debugging a "scan finds nothing" case see why neighbor cache
+        # bootstrapping failed.
+        logger.debug("prewarm_neighbors failed", exc_info=True)
 
 
 def tcp_port_open(ip: str, port: int = 80) -> bool:

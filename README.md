@@ -149,6 +149,21 @@ BMUIPASS=请替换为强密码 docker compose up -d
 | `BMCONFIGBATCHMAX` | 64 | 批量配置设备数上限 |
 | `BMPREWARMCONCURRENCY` | 64 | 扫描阶段并发 ping 上限 |
 | `BMTRUSTEDPROXYHOPS` | 0 | 信任的反代层数（≥1时用X-Forwarded-For） |
+| `BMTOKENTTL` | 7200 | 登录会话过期时间（秒，默认 2 小时） |
+| `BMDEVICESPAGESIZE` | 100 | `/api/devices` 默认分页大小 |
+| `BMDEVICESMAXPAGESIZE` | 1000 | `/api/devices` `page_size` 上限（防一次拉全表） |
+| `BMREGEXTIMEOUT` | 1.0 | 用户正则替换超时（秒，ReDoS 防御） |
+| `BMAUDITLOGFILE` | 空 | 审计日志落盘路径（空则只走 logging）；按大小轮转，默认 10MB×5 |
+| `BMAUDITLOGMAXBYTES` | 10485760 | 审计日志单文件最大字节数（轮转阈值） |
+| `BMAUDITLOGBACKUPS` | 5 | 审计日志保留份数 |
+| `BMSCANRATELIMIT` | 1 | `/api/scan` 触发频率（次/窗口） |
+| `BMSCANRATEPERIOD` | 60 | 扫描限流窗口（秒） |
+| `BMMETRICS_TOKEN` | 空 | 设置后启用 `/metrics` 端点；未设置则 endpoint 不注册（默认关闭） |
+| `BMCSRF_COOKIE_NAME` | bm_csrf | CSRF 令牌 cookie 名称 |
+| `BMCSRF_HEADER_NAME` | X-CSRF-Token | CSRF 校验请求头名称 |
+| `BMSESSION_COOKIE_NAME` | bm_session | 会话 httpOnly cookie 名称 |
+| `BMSESSION_COOKIE_SECURE` | 1 | 会话 cookie 仅 HTTPS 回传（本地开发可设 0） |
+| `BMSESSION_COOKIE_SAMESITE` | lax | 会话 cookie SameSite 策略（lax / strict / none） |
 
 #### 本地构建镜像
 
