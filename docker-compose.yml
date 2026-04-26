@@ -28,9 +28,15 @@ services:
       - BMALLOWORIGINS=${BMALLOWORIGINS:-}
     volumes:
       - ./data:/opt/board-manager/data
+    # FIX(P2#10): the previous healthcheck only verified that the HTTP
+    # listener answered 200 on /api/health. The endpoint now also pings
+    # the SQLite DB and returns 503 on failure, so an unhealthy state
+    # actually catches stuck-but-listening processes / broken volume
+    # mounts. start_period bumped to 30s so cold-boot DB init / first
+    # SQLAlchemy connect doesn't trip the early checks.
     healthcheck:
-      test: ["CMD-SHELL", "curl -f \"http://localhost:$$SERVER_PORT/api/health\" || exit 1"]
+      test: ["CMD-SHELL", "curl -fsS \"http://localhost:$$SERVER_PORT/api/health\" || exit 1"]
       interval: 30s
       timeout: 10s
       retries: 3
-      start_period: 5s
+      start_period: 30s

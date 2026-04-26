@@ -105,9 +105,12 @@ ENV SERVER_PORT=8000
 # 暴露端口
 EXPOSE 8000
 
-# 健康检查（shell 形式，容器内运行时解析 SERVER_PORT）
-HEALTHCHECK --interval=30s --timeout=10s --start-period=5s --retries=3 \
-    CMD curl -f "http://localhost:${SERVER_PORT}/api/health" || exit 1
+# FIX(P2#10): /api/health now pings the SQLite DB and returns 503 on
+# failure, so this catches stuck-but-listening processes too. The
+# start_period is 30s (was 5s) -- enough for cold DB init and the first
+# SQLAlchemy connect on slow disks.
+HEALTHCHECK --interval=30s --timeout=10s --start-period=30s --retries=3 \
+    CMD curl -fsS "http://localhost:${SERVER_PORT}/api/health" || exit 1
 
 # FIX(P0#3): drop privileges before launching uvicorn.
 USER board-manager:board-manager
