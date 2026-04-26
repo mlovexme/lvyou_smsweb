@@ -6,12 +6,12 @@ import os
 import pytest
 
 
-def test_check_login_credentials_uses_constant_time(backend):
-    # Both helpers are imported via fixture; this test asserts that the
-    # boolean function returns True only on exact match. The hmac
-    # behaviour itself is the upstream guarantee.
-    backend.UIUSER = "admin"
-    backend.UIPASS = "goodpass1"
+def test_check_login_credentials_uses_constant_time(backend, monkeypatch):
+    # Both helpers are imported via the session-scoped fixture; mutate
+    # the module globals through monkeypatch so the override is rolled
+    # back at the end of this test rather than leaking into other tests.
+    monkeypatch.setattr(backend, "UIUSER", "admin")
+    monkeypatch.setattr(backend, "UIPASS", "goodpass1")
     assert backend._check_login_credentials("admin", "goodpass1") is True
     assert backend._check_login_credentials("admin", "wrong") is False
     assert backend._check_login_credentials("Admin", "goodpass1") is False
