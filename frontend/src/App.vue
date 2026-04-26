@@ -33,6 +33,7 @@ import LoginView from './components/LoginView.vue'
 import NoticeBar from './components/NoticeBar.vue'
 import OtaModal from './components/OtaModal.vue'
 import MessagePanel from './components/MessagePanel.vue'
+import Pagination from './components/Pagination.vue'
 import PromptModal from './components/PromptModal.vue'
 import StatsGrid from './components/StatsGrid.vue'
 import WifiModal from './components/WifiModal.vue'
@@ -771,10 +772,10 @@ function updateDetailSim(field, value) {
 
       <div class="tab-bar">
         <button :class="['tab-btn', { active: activeTab === 'devices' }]" @click="activeTab = 'devices'">
-          设备列表 ({{ filteredDevices.length }})
+          设备列表 ({{ devicesStore.devicesTotal }})
         </button>
         <button :class="['tab-btn', { active: activeTab === 'numbers' }]" @click="activeTab = 'numbers'">
-          号码列表 ({{ filteredNumbers.length }})
+          号码列表 ({{ devicesStore.numbersTotal }})
         </button>
       </div>
 
@@ -850,6 +851,15 @@ function updateDetailSim(field, value) {
         </div>
       </div>
 
+      <Pagination
+        v-if="activeTab === 'devices'"
+        :page="devicesStore.devicesPage"
+        :pages="devicesStore.devicesPages"
+        :page-size="devicesStore.devicesPageSize"
+        :total="devicesStore.devicesTotal"
+        @change="devicesStore.setDevicesPage"
+      />
+
       <div v-if="activeTab === 'numbers'" class="numbers-table">
         <div v-if="filteredNumbers.length === 0" class="empty-state">
           <div class="empty-icon" aria-hidden="true">
@@ -873,6 +883,13 @@ function updateDetailSim(field, value) {
             </tr>
           </tbody>
         </table>
+        <Pagination
+          :page="devicesStore.numbersPage"
+          :pages="devicesStore.numbersPages"
+          :page-size="devicesStore.numbersPageSize"
+          :total="devicesStore.numbersTotal"
+          @change="devicesStore.setNumbersPage"
+        />
       </div>
 
       <WifiModal

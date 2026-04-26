@@ -1110,13 +1110,45 @@ DEVICES_DEFAULT_PAGE_SIZE = int(os.environ.get("BMDEVICESPAGESIZE", "500"))
 DEVICES_MAX_PAGE_SIZE     = int(os.environ.get("BMDEVICESMAXPAGESIZE", "1000"))
 
 
+# FIX(P2#7): the search and group filters that App.vue used to apply
+# client-side now move into the backend so /api/devices?q=...&group=...
+# can drive real server-side pagination. Without this, true pagination
+# would interact badly with client-side filters: a user could see
+# "0 results" on page 3 of 10 simply because the matching devices fell
+# on other pages.
+def _apply_devices_filter(query, q: str, group: str):
+    qval = (q or "").strip().lower()
+    if qval:
+        # SQLite LIKE is case-insensitive for ASCII by default. Match the
+        # same fields the old client-side filter looked at: ip, mac,
+        # devId, alias, sim1/sim2 numbers and operators.
+        like = f"%{qval}%"
+        query = query.filter(
+            (Device.ip.ilike(like))
+            | (Device.mac.ilike(like))
+            | (Device.devId.ilike(like))
+            | (Device.alias.ilike(like))
+            | (Device.sim1number.ilike(like))
+            | (Device.sim2number.ilike(like))
+            | (Device.sim1operator.ilike(like))
+            | (Device.sim2operator.ilike(like))
+        )
+    gval = (group or "").strip()
+    if gval and gval != "all":
+        query = query.filter(Device.grp == gval)
+    return query
+
+
 @app.get("/api/devices")
 def apidevices(
     page: int = Query(1, ge=1),
     page_size: int = Query(DEVICES_DEFAULT_PAGE_SIZE, ge=1, le=DEVICES_MAX_PAGE_SIZE),
+    q: str = Query("", max_length=128),
+    group: str = Query("", max_length=64),
     db: Session = Depends(get_db),
 ):
     query = db.query(Device).order_by(Device.created.desc(), Device.id.desc())
+    query = _apply_devices_filter(query, q, group)
     total = query.count()
     items = query.offset((page - 1) * page_size).limit(page_size).all()
     return {
@@ -1128,13 +1160,36 @@ def apidevices(
     }
 
 
+@app.get("/api/devices/groups")
+def apidevicesgroups(db: Session = Depends(get_db)):
+    """Return the distinct, non-empty group names so the dashboard can
+    populate the group dropdown without paging through every device."""
+    rows = (
+        db.query(Device.grp)
+        .filter(Device.grp.isnot(None), Device.grp != "")
+        .distinct()
+        .all()
+    )
+    groups = sorted({row[0] for row in rows if row[0]})
+    return {"items": groups}
+
+
 @app.get("/api/numbers")
 def apinumbers(
     page: int = Query(1, ge=1),
     page_size: int = Query(DEVICES_DEFAULT_PAGE_SIZE, ge=1, le=DEVICES_MAX_PAGE_SIZE),
+    q: str = Query("", max_length=128),
     db: Session = Depends(get_db),
 ):
     all_nums = getallnumbers(db)
+    qval = (q or "").strip().lower()
+    if qval:
+        all_nums = [
+            n for n in all_nums
+            if qval in (n.get("number") or "").lower()
+            or qval in (n.get("operator") or "").lower()
+            or qval in (n.get("deviceName") or "").lower()
+        ]
     total = len(all_nums)
     start = (page - 1) * page_size
     return {
