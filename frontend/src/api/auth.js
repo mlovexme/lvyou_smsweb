@@ -1,53 +1,49 @@
-import { TOKEN_EXPIRES_KEY, TOKEN_KEY, clearToken, setToken } from './client'
+import { TOKEN_EXPIRES_KEY, TOKEN_KEY, api } from './client'
 
-// FIX(P1#10): switch token storage from localStorage to sessionStorage so
-// the token does not persist across browser restarts and is scoped to a
-// single tab. localStorage is shared across tabs and persists indefinitely
-// until explicitly cleared, which makes any stored XSS payload trivially
-// exfiltrate the token. sessionStorage still does not protect against an
-// active XSS, but it bounds the blast radius (no cross-tab leak, evicted
-// when the tab closes) at zero cost. A proper httpOnly cookie path is
-// tracked as a follow-up.
-//
-// We also clean up any token left over in localStorage from older builds
-// so the upgrade does not leave a dangling secret behind.
-const _store = window.sessionStorage
+// FIX(P2#1): the auth token now lives in an httpOnly cookie set by the
+// backend, so JavaScript no longer touches it. This module's job
+// shrinks to (a) probing /api/me to find out if the cookie is valid,
+// and (b) cleaning up stale storage from older builds (P1#10's
+// sessionStorage and the original P0 localStorage).
+const _LEGACY_KEYS = [TOKEN_KEY, TOKEN_EXPIRES_KEY]
 
-function _migrateLegacy() {
+function _purgeLegacyStorage() {
   try {
-    const legacy = window.localStorage.getItem(TOKEN_KEY)
-    if (legacy) {
-      window.localStorage.removeItem(TOKEN_KEY)
-      window.localStorage.removeItem(TOKEN_EXPIRES_KEY)
+    for (const k of _LEGACY_KEYS) {
+      window.sessionStorage.removeItem(k)
+      window.localStorage.removeItem(k)
     }
   } catch {
-    // sessionStorage / localStorage may be disabled (private mode quotas);
-    // failing silently keeps the SPA usable on the login page.
+    // sessionStorage / localStorage may be disabled in private browsing
+    // contexts. Failing silently keeps the SPA usable on the login page.
   }
 }
 
-export function saveAuth(token, expiresIn) {
-  _migrateLegacy()
-  const expiresAt = Date.now() + (expiresIn * 1000)
-  _store.setItem(TOKEN_KEY, token)
-  _store.setItem(TOKEN_EXPIRES_KEY, String(expiresAt))
-  setToken(token)
+export async function checkAuth() {
+  _purgeLegacyStorage()
+  try {
+    const resp = await api.get('/api/me')
+    return {
+      ok: true,
+      username: (resp.data && resp.data.username) || '',
+      expiresIn: (resp.data && resp.data.expiresIn) || 0
+    }
+  } catch {
+    return { ok: false }
+  }
+}
+
+// Kept as no-op shims so call sites do not need to learn a new shape.
+// The cookie is set/cleared by the server on /api/login and /api/logout.
+export function saveAuth() {
+  _purgeLegacyStorage()
 }
 
 export function clearStoredAuth() {
-  _store.removeItem(TOKEN_KEY)
-  _store.removeItem(TOKEN_EXPIRES_KEY)
-  clearToken()
+  _purgeLegacyStorage()
 }
 
-export function restoreAuth() {
-  _migrateLegacy()
-  const token = _store.getItem(TOKEN_KEY)
-  const expiresAt = parseInt(_store.getItem(TOKEN_EXPIRES_KEY) || '0', 10)
-  if (!token || !expiresAt || Date.now() >= expiresAt) {
-    clearStoredAuth()
-    return false
-  }
-  setToken(token)
-  return true
+export async function restoreAuth() {
+  const r = await checkAuth()
+  return r.ok
 }

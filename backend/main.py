@@ -24,6 +24,7 @@ from sqlalchemy.ext.declarative import declarative_base
 from sqlalchemy.orm import sessionmaker, Session
 
 import concurrent.futures
+import hashlib
 import hmac
 import logging
 import uuid as _uuid
@@ -57,6 +58,20 @@ UIPASS             = os.environ.get("BMUIPASS",  "")
 # how long a stolen token (XSS, leaked browser) is useful before the user
 # must re-authenticate. Operators can still override via BMTOKENTTL.
 TOKEN_TTL_SECONDS  = int(os.environ.get("BMTOKENTTL", str(2 * 60 * 60)))
+# FIX(P2#1): cookie-based session + CSRF. The browser SPA now authenticates
+# via an httpOnly cookie (`AUTH_COOKIE_NAME`) which JavaScript cannot read,
+# closing the XSS-driven token theft path. A second non-httpOnly cookie
+# (`CSRF_COOKIE_NAME`) carries a value derived deterministically from the
+# auth token; the SPA echoes it in the X-CSRF-Token header on every state-
+# changing request. A cross-origin attacker cannot read the CSRF cookie
+# (same-origin policy) and so cannot forge the header.
+AUTH_COOKIE_NAME   = os.environ.get("BMAUTHCOOKIE", "board_mgr_auth")
+CSRF_COOKIE_NAME   = os.environ.get("BMCSRFCOOKIE", "board_mgr_csrf")
+CSRF_HEADER_NAME   = "X-CSRF-Token"
+COOKIE_SECURE      = os.environ.get("BMCOOKIESECURE", "").strip().lower() in {"1", "true", "yes", "on"}
+COOKIE_SAMESITE    = (os.environ.get("BMCOOKIESAMESITE", "lax") or "lax").strip().lower()
+if COOKIE_SAMESITE not in ("lax", "strict", "none"):
+    COOKIE_SAMESITE = "lax"
 PREWARM_CONCURRENCY = int(os.environ.get("BMPREWARMCONCURRENCY", "64"))
 OTA_BATCH_MAX      = int(os.environ.get("BMOTABATCHMAX",       "64"))
 CONFIG_MAX_CHARS   = int(os.environ.get("BMCONFIGMAXCHARS",    "524288"))
@@ -345,12 +360,65 @@ def _extract_bearer_token(request: Request) -> str:
     return auth[7:].strip()
 
 
+def _extract_request_token(request: Request) -> Tuple[str, bool]:
+    """FIX(P2#1): return (token, via_cookie). Authorization header takes
+    precedence (CLI / programmatic clients keep working), falling back to
+    the AUTH_COOKIE_NAME cookie for browser sessions. The boolean tells
+    the caller whether the token came from a cookie -- only cookie auth
+    is vulnerable to CSRF and therefore requires the X-CSRF-Token check."""
+    bearer = _extract_bearer_token(request)
+    if bearer:
+        return bearer, False
+    cookie_token = request.cookies.get(AUTH_COOKIE_NAME, "")
+    return cookie_token.strip(), True
+
+
+def _csrf_for_token(token: str) -> str:
+    """FIX(P2#1): deterministic CSRF derivation. We do not persist a
+    separate CSRF column; rotating BMUIPASS rotates the HMAC key and
+    therefore invalidates every previously-issued CSRF cookie."""
+    if not token:
+        return ""
+    key = hashlib.sha256(b"board-mgr-csrf-v1::" + UIPASS.encode("utf-8")).digest()
+    return hmac.new(key, token.encode("utf-8"), hashlib.sha256).hexdigest()
+
+
+def _set_auth_cookies(response, token: str) -> None:
+    """FIX(P2#1): write both auth (httpOnly) and CSRF (JS-readable) cookies."""
+    csrf = _csrf_for_token(token)
+    response.set_cookie(
+        AUTH_COOKIE_NAME, token,
+        max_age=TOKEN_TTL_SECONDS,
+        httponly=True,
+        secure=COOKIE_SECURE,
+        samesite=COOKIE_SAMESITE,
+        path="/",
+    )
+    response.set_cookie(
+        CSRF_COOKIE_NAME, csrf,
+        max_age=TOKEN_TTL_SECONDS,
+        httponly=False,
+        secure=COOKIE_SECURE,
+        samesite=COOKIE_SAMESITE,
+        path="/",
+    )
+
+
+def _clear_auth_cookies(response) -> None:
+    response.delete_cookie(AUTH_COOKIE_NAME, path="/")
+    response.delete_cookie(CSRF_COOKIE_NAME, path="/")
+
+
 def _unauthorized_json(detail: str = "未登录或登录已失效") -> JSONResponse:
     return JSONResponse(status_code=401, content={"detail": detail})
 
 
+def _forbidden_json(detail: str) -> JSONResponse:
+    return JSONResponse(status_code=403, content={"detail": detail})
+
+
 def _require_token(request: Request) -> Dict[str, Any]:
-    token = _extract_bearer_token(request)
+    token, _ = _extract_request_token(request)
     if not token:
         raise HTTPException(status_code=401, detail="未登录或登录已失效")
     payload = _get_token_record(token)
@@ -382,6 +450,14 @@ def _validate_startup_security() -> None:
             "BMUIPASS must be set to a strong non-default password before starting. "
             "Set BMUIPASS=<strong password> (or BMINSECURE_DEFAULT_PASSWORD=1 for "
             "local development only)."
+        )
+    # FIX(P2#1): SameSite=None is rejected by every modern browser unless
+    # the cookie is also Secure. Catch this misconfiguration at startup
+    # rather than silently dropping the auth cookie at request time.
+    if COOKIE_SAMESITE == "none" and not COOKIE_SECURE:
+        raise RuntimeError(
+            "BMCOOKIESAMESITE=none requires BMCOOKIESECURE=1; browsers will "
+            "reject SameSite=None cookies sent over plain HTTP."
         )
 
 
@@ -496,7 +572,9 @@ def _configure_cors(_app: FastAPI) -> None:
         allow_origins=origins,
         allow_credentials=True,
         allow_methods=["GET", "POST", "DELETE"],
-        allow_headers=["Authorization", "Content-Type"],
+        # FIX(P2#1): allow X-CSRF-Token so the SPA can attach the double-
+        # submit value on cross-origin state-changing requests.
+        allow_headers=["Authorization", "Content-Type", CSRF_HEADER_NAME],
     )
 
 
@@ -504,16 +582,34 @@ def _configure_cors(_app: FastAPI) -> None:
 # needing a Bearer token. The endpoint returns only liveness info.
 _PUBLIC_PATHS = {"/", "/api/login", "/api/health"}
 
+# FIX(P2#1): methods that mutate state and therefore must carry a valid
+# X-CSRF-Token header when the caller authenticated via a cookie. Bearer-
+# header authentication does not need CSRF since CSRF is specifically
+# about cookies-attached-by-the-browser.
+_CSRF_REQUIRED_METHODS = {"POST", "PUT", "PATCH", "DELETE"}
+
 
 @app.middleware("http")
 async def token_auth_mw(request: Request, call_next):
     path = request.url.path
     if request.method == "OPTIONS" or path.startswith("/static/") or path in _PUBLIC_PATHS:
         return await call_next(request)
-    try:
-        _require_token(request)
-    except HTTPException as exc:
-        return _unauthorized_json(exc.detail)
+    token, via_cookie = _extract_request_token(request)
+    if not token:
+        return _unauthorized_json("未登录或登录已失效")
+    record = _get_token_record(token)
+    if not record:
+        return _unauthorized_json("未登录或登录已失效")
+    if record.get("exp", 0) <= nowts():
+        _delete_token(token)
+        return _unauthorized_json("登录已过期，请重新登录")
+    # FIX(P2#1): CSRF gate. Only enforced on cookie-auth + state-changing
+    # methods so that bearer-token CLIs and read-only GETs are unaffected.
+    if via_cookie and request.method in _CSRF_REQUIRED_METHODS:
+        provided = request.headers.get(CSRF_HEADER_NAME, "").strip()
+        expected = _csrf_for_token(token)
+        if not provided or not hmac.compare_digest(provided, expected):
+            return _forbidden_json("CSRF token 缺失或不匹配")
     return await call_next(request)
 
 
@@ -1127,15 +1223,42 @@ def api_login(req: LoginReq, request: Request):
         raise HTTPException(status_code=401, detail="用户名或密码错误")
     token = _issue_token(username)
     _audit("login", user=username, detail=f"ip={client_ip}")
-    return {"ok": True, "token": token, "username": username, "expiresIn": TOKEN_TTL_SECONDS}
+    # FIX(P2#1): the auth token is set as an httpOnly cookie so it is not
+    # readable from JavaScript. The token is still echoed in the response
+    # body for backwards compatibility with header-based CLI callers --
+    # the browser SPA ignores it now and relies on the cookie + CSRF flow.
+    response = JSONResponse(content={
+        "ok": True, "token": token, "username": username, "expiresIn": TOKEN_TTL_SECONDS,
+    })
+    _set_auth_cookies(response, token)
+    return response
+
+
+@app.get("/api/me")
+def api_me(request: Request):
+    """FIX(P2#1): SPA bootstrap probe. After the cookie migration the
+    frontend can no longer read the token from JS, so it asks the server
+    'am I logged in?' on app start. Returns 401 (handled by the auth
+    middleware before this body even runs) when not authenticated."""
+    token, _ = _extract_request_token(request)
+    record = _get_token_record(token) if token else None
+    if not record:
+        raise HTTPException(status_code=401, detail="未登录")
+    return {
+        "ok": True,
+        "username": record.get("username", ""),
+        "expiresIn": max(0, int(record.get("exp", 0)) - nowts()),
+    }
 
 
 @app.post("/api/logout")
 def api_logout(request: Request):
-    token = _extract_bearer_token(request)
+    token, _ = _extract_request_token(request)
     if token:
         _delete_token(token)
-    return {"ok": True}
+    response = JSONResponse(content={"ok": True})
+    _clear_auth_cookies(response)
+    return response
 
 
 @app.get("/api/health")

@@ -154,7 +154,10 @@ api.interceptors.response.use(
 )
 
 onMounted(async () => {
-  if (!restoreAuth()) return
+  // FIX(P2#1): restoreAuth() now returns a Promise<boolean> because it
+  // hits /api/me to verify the httpOnly auth cookie -- we no longer have
+  // a token in sessionStorage to inspect synchronously.
+  if (!(await restoreAuth())) return
   loading.value = true
   try {
     await healthApi()
