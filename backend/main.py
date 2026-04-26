@@ -133,16 +133,43 @@ class RateLimiter:
         self._hits: Dict[str, list] = defaultdict(list)
         self._lock   = _Lock()
 
+    def _prune_locked(self, key: str, now: float) -> list:
+        window = [t for t in self._hits.get(key, []) if now - t < self._period]
+        self._hits[key] = window
+        return window
+
     def allow(self, key: str) -> bool:
+        """Check the limit and record this attempt atomically."""
         now = time.time()
         with self._lock:
-            window = [t for t in self._hits[key] if now - t < self._period]
+            window = self._prune_locked(key, now)
             if len(window) >= self._max:
-                self._hits[key] = window
                 return False
             window.append(now)
-            self._hits[key] = window
             return True
+
+    def check_only(self, key: str) -> bool:
+        """FIX(P2#2): non-recording probe. Used by the login flow to gate
+        before validating credentials so a flood of well-formed login
+        requests does not consume the budget for legitimate users."""
+        now = time.time()
+        with self._lock:
+            return len(self._prune_locked(key, now)) < self._max
+
+    def record(self, key: str) -> None:
+        """FIX(P2#2): record an event without a guard check. Paired with
+        check_only() the caller can implement count-failures-only
+        semantics: fat-fingering a password and then succeeding does not
+        eat the budget, but failed attempts do."""
+        now = time.time()
+        with self._lock:
+            window = self._prune_locked(key, now)
+            window.append(now)
+
+    def reset(self, key: str) -> None:
+        """FIX(P2#2): clear the failure window after a successful login."""
+        with self._lock:
+            self._hits.pop(key, None)
 
     def remaining(self, key: str) -> int:
         now = time.time()
@@ -153,8 +180,23 @@ class RateLimiter:
 
 _sms_limiter  = RateLimiter(int(os.environ.get("BMSMSRATELIMIT",  "10")), float(os.environ.get("BMSMSRATEPERIOD",  "60")))
 _dial_limiter = RateLimiter(int(os.environ.get("BMDIALRATELIMIT",  "5")), float(os.environ.get("BMDIALRATEPERIOD", "60")))
-# FIX: login brute-force rate limiter
-_login_limiter= RateLimiter(int(os.environ.get("BMLOGINRATELIMIT", "5")), float(os.environ.get("BMLOGINRATEPERIOD","60")))
+# FIX(P2#2): two-dimensional login rate limit. The IP limiter catches one
+# attacker probing many usernames; the username limiter catches a
+# distributed bruteforce of a single known account from many addresses.
+# Both are count-failures-only so legitimate users with one or two typos
+# are not locked out alongside attackers. Defaults stay at 5 failures /
+# 60s for IP (preserves the previous BMLOGINRATELIMIT/PERIOD knobs) and
+# 10 / 600 for username (looser but with a much wider window so a slow
+# distributed attack still hits the cap before exhausting the password
+# space).
+_login_limiter_ip = RateLimiter(
+    int(os.environ.get("BMLOGINRATELIMIT", "5")),
+    float(os.environ.get("BMLOGINRATEPERIOD", "60")),
+)
+_login_limiter_user = RateLimiter(
+    int(os.environ.get("BMLOGINUSERRATELIMIT", "10")),
+    float(os.environ.get("BMLOGINUSERRATEPERIOD", "600")),
+)
 # FIX(N5): OTA batch rate limiter (per user), prevents using it as an internal reboot-storm
 _ota_limiter  = RateLimiter(int(os.environ.get("BMOTARATELIMIT",  "4")), float(os.environ.get("BMOTARATEPERIOD",  "60")))
 
@@ -1216,11 +1258,30 @@ def api_login(req: LoginReq, request: Request):
     # FIX(P1#13): use X-Forwarded-For when running behind a trusted reverse
     # proxy so the login rate limiter keys on the real client IP.
     client_ip = _client_ip(request)
-    if not _login_limiter.allow(client_ip):
-        raise HTTPException(status_code=429, detail="登录尝试过于频繁，请稍后再试")
     username = (req.username or "").strip()
+    # FIX(P2#2): username key is lower-cased so an attacker can't bypass
+    # the limiter by alternating "Admin" / "ADMIN" / "admin". Empty
+    # username is not subject to the per-user limit (the IP limiter still
+    # catches the flood) since "" is not a real account.
+    user_key = username.lower() if username else ""
+    if not _login_limiter_ip.check_only(client_ip):
+        raise HTTPException(status_code=429, detail="登录尝试过于频繁，请稍后再试")
+    if user_key and not _login_limiter_user.check_only(user_key):
+        raise HTTPException(status_code=429, detail="该账号登录尝试过于频繁，请稍后再试")
     if not _check_login_credentials(username, req.password or ""):
+        # FIX(P2#2): record the failure on both axes so a single mistake
+        # eats one slot from each. A legitimate user who succeeds on the
+        # next attempt gets their window reset (see below).
+        _login_limiter_ip.record(client_ip)
+        if user_key:
+            _login_limiter_user.record(user_key)
         raise HTTPException(status_code=401, detail="用户名或密码错误")
+    # FIX(P2#2): clear the per-user window on successful auth so honest
+    # typo cycles do not accumulate over the day. The IP window is left
+    # alone -- a single shared NAT egress should not be reset by one
+    # legitimate login if other accounts on that IP are being attacked.
+    if user_key:
+        _login_limiter_user.reset(user_key)
     token = _issue_token(username)
     _audit("login", user=username, detail=f"ip={client_ip}")
     # FIX(P2#1): the auth token is set as an httpOnly cookie so it is not
