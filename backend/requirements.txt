@@ -8,3 +8,7 @@ pydantic>=2.0.0
 # (PyPI `regex`) is API-compatible with stdlib re and adds a `timeout=`
 # argument that aborts catastrophic backtracking.
 regex>=2024.0.0
+# FIX(P2#8): /metrics endpoint for Prometheus scraping. Default
+# instrumentation covers HTTP latency / count / status; custom
+# device_total / login_attempts gauges are wired in main.py.
+prometheus-fastapi-instrumentator>=7.0.0
