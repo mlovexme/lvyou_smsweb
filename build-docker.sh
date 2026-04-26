@@ -1,7 +1,7 @@
 #!/bin/bash
 
 # 绿邮X系列内网群控系统 Docker 构建脚本
-# 版本: 3.4.0
+# 版本: 5.0
 
 set -e
 
@@ -22,15 +22,15 @@ show_help() {
 
 选项:
   -t, --tag TAG         镜像标签 (默认: latest)
-  -v, --version VER     版本号 (默认: 3.4.0)
+  -v, --version VER     版本号 (默认: 5.0)
   -p, --push            推送到 Docker Hub
   --platform PLATFORMS  构建平台 (默认: linux/amd64,linux/arm64)
   -h, --help            显示此帮助信息
 
 示例:
   $0                          # 构建最新版本镜像
-  $0 -t v3.4.0               # 构建指定标签
-  $0 -p -t v3.4.0            # 构建并推送
+  $0 -t v5.0               # 构建指定标签
+  $0 -p -t v5.0            # 构建并推送
   $0 --platform linux/amd64  # 仅构建 amd64 架构
 
 环境变量:

@@ -11,8 +11,6 @@ if [[ -d "${ROOT_DIR}/scripts" ]]; then
 fi
 APPDIR="/opt/board-manager"
 APIPORT="8000"
-SCANUSER="admin"
-SCANPASS="admin"
 UIPASS=""
 CONFIG_FILE="/etc/board-manager.conf"
 OS_FAMILY="debian"
@@ -22,7 +20,7 @@ source "${ROOT_DIR}/scripts/common.sh"
 usage() {
   cat <<EOF
 用法:
-  sudo ./install.sh install [--port 8000] [--scan-user admin] [--scan-pass admin] [--ui-pass 123456]
+  sudo ./install.sh install [--port 8000] [--ui-pass 至少8位强密码]
   sudo ./install.sh status
   sudo ./install.sh restart
   sudo ./install.sh logs
@@ -110,6 +108,7 @@ load_existing_config() {
   if [[ -f "${CONFIG_FILE}" ]]; then
     # shellcheck disable=SC1090
     source "${CONFIG_FILE}" || true
+    UIPASS="${BMUIPASS:-${UIPASS}}"
   fi
 }
 
@@ -138,7 +137,6 @@ prompt_api_port() {
   done
 }
 
-# ========== 修正后的 prompt_ui_pass（保留已有密码选项）==========
 prompt_ui_pass() {
   if [[ -n "${UIPASS}" ]]; then
     local keep_old=""
@@ -151,9 +149,9 @@ prompt_ui_pass() {
   fi
 
   while true; do
-    read_tty "请设置 UI 登录密码(至少6位): " pass1
-    if [[ ${#pass1} -lt 6 ]]; then
-      log_err "密码至少 6 位"
+    read_tty "请设置 UI 登录密码(至少8位，不能为admin): " pass1
+    if [[ ${#pass1} -lt 8 || "${pass1}" == "admin" ]]; then
+      log_err "密码至少 8 位且不能为 admin"
       continue
     fi
 
@@ -167,7 +165,6 @@ prompt_ui_pass() {
     break
   done
 }
-# ========================================================
 
 check_port() {
   local port="$1"
@@ -184,9 +181,8 @@ write_config() {
   cat > "${CONFIG_FILE}" <<EOF
 APPDIR="${APPDIR}"
 APIPORT="${APIPORT}"
-SCANUSER="${SCANUSER}"
-SCANPASS="${SCANPASS}"
-UIPASS="${UIPASS}"
+BMUIUSER="admin"
+BMUIPASS="${UIPASS}"
 EOF
   chmod 600 "${CONFIG_FILE}"
 }
@@ -204,7 +200,9 @@ install_backend() {
   "${APPDIR}/venv/bin/pip" install --upgrade pip
   "${APPDIR}/venv/bin/pip" install -r "${ROOT_DIR}/backend/requirements.txt"
 
-  cp "${ROOT_DIR}/backend/main.py" "${APPDIR}/app/main.py"
+  rm -rf "${APPDIR}/app"
+  mkdir -p "${APPDIR}/app"
+  cp -a "${ROOT_DIR}/backend" "${APPDIR}/app/backend"
 }
 
 install_frontend() {
@@ -229,9 +227,7 @@ render_service() {
   sed \
     -e "s|{{APPDIR}}|${APPDIR}|g" \
     -e "s|{{APIPORT}}|${APIPORT}|g" \
-    -e "s|{{SCANUSER}}|${SCANUSER}|g" \
-    -e "s|{{SCANPASS}}|${SCANPASS}|g" \
-    -e "s|{{UIPASS}}|${UIPASS}|g" \
+    -e "s|{{CONFIG_FILE}}|${CONFIG_FILE}|g" \
     "${template}" > "${output}"
 }
 
@@ -319,7 +315,7 @@ show_result() {
   log_info "程序目录: ${APPDIR}"
   log_info "配置文件: ${CONFIG_FILE}"
   log_info "服务端口: ${APIPORT}"
-  log_info "扫描账号: ${SCANUSER}"
+  log_info "设备账号: admin"
 
   if [[ -n "${ip}" ]]; then
     log_info "推荐访问地址: http://${ip}:${APIPORT}/"
@@ -380,14 +376,6 @@ while [[ $# -gt 0 ]]; do
     --port)
       APIPORT="$2"
       CLI_PORT_SET=1
-      shift 2
-      ;;
-    --scan-user)
-      SCANUSER="$2"
-      shift 2
-      ;;
-    --scan-pass)
-      SCANPASS="$2"
       shift 2
       ;;
     --ui-pass)

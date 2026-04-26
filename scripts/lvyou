@@ -100,7 +100,7 @@ do_status() {
   if [[ -n "${APIPORT:-}" ]]; then
     printf '\n%b配置信息:%b\n' "${BOLD}" "${NC}"
     printf '  端口: %s\n' "${APIPORT}"
-    printf '  扫描账号: %s\n' "${SCANUSER:-admin}"
+    printf '  设备账号: admin\n'
     printf '  程序目录: %s\n' "${APPDIR}"
     printf '  配置文件: %s\n' "${CONFIG_FILE}"
   fi
@@ -120,12 +120,12 @@ do_change_password() {
   log_title "更改 UI 密码"
   load_config
 
-  printf '请输入新密码 (至少6位): '
+  printf '请输入新密码 (至少8位，不能为admin): '
   read -rs pass1
   printf '\n'
 
-  if [[ ${#pass1} -lt 6 ]]; then
-    log_err "密码至少需要 6 位"
+  if [[ ${#pass1} -lt 8 || "${pass1}" == "admin" ]]; then
+    log_err "密码至少需要 8 位且不能为 admin"
     return 1
   fi
 
@@ -146,12 +146,13 @@ do_change_password() {
   if [[ -f "${CONFIG_FILE}" ]]; then
     awk -v new_pass="${pass1}" '
       BEGIN { written = 0 }
-      /^UIPASS=/ { printf "UIPASS=\"%s\"\n", new_pass; written = 1; next }
+      /^BMUIPASS=/ { printf "BMUIPASS=\"%s\"\n", new_pass; written = 1; next }
+      /^UIPASS=/ { next }
       { print }
-      END { if (!written) printf "UIPASS=\"%s\"\n", new_pass }
+      END { if (!written) printf "BMUIPASS=\"%s\"\n", new_pass }
     ' "${CONFIG_FILE}" > "${tmp_file}"
   else
-    printf 'UIPASS="%s"\n' "${pass1}" > "${tmp_file}"
+    printf 'BMUIPASS="%s"\n' "${pass1}" > "${tmp_file}"
   fi
   chmod --reference="${CONFIG_FILE}" "${tmp_file}" 2>/dev/null || chmod 600 "${tmp_file}"
   mv -f "${tmp_file}" "${CONFIG_FILE}"

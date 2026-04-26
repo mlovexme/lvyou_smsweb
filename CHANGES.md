@@ -1,6 +1,6 @@
 # 修复清单（基线：lvyou_smsweb_3 zip）
 
-排除项：弱默认凭据 / 明文密码比较 / `BMUIPASS=admin` 默认值 — 按要求未改动。
+说明：早期版本保留过 `BMUIPASS=admin` 默认值；当前版本已要求生产环境显式设置 UI 密码。
 
 ## 必修级（升级 / 部署阻断问题）
 
@@ -19,7 +19,7 @@
 | N5 | OTA 批量接口无限流、无数量上限，登录用户可让内网设备并发重启 | 新增 `_ota_limiter`（默认 4 次/60 秒/IP）+ `OTA_BATCH_MAX=64` 上限 + audit 日志 |
 | N6 | `upgrade_ota_task` 重复调用 `chkNewVer`（每台 2 次外发），N 台设备 2N 次握手 | 合并为单次 `_ota_check`：拿到 `newVer` 后直接触发升级，无匹配/同版本直接返回 `已是最新版本` |
 | N7 | WiFi 预览接口返回假数据 `"(待获取)"`，前端却强制要求点预览才能执行 | 预览改为真正并发调用 `get_wifi_info()` 拿回设备当前 SSID；前端不再把"已预览"作为"执行"按钮的解锁条件 |
-| N8 | `scripts/lvyou pass` 用 `sed "s/.../${pass1}/"` 替换，密码含 `/ & " \ $` 会炸配置 | 改 awk 原子重写 + `mv` 替换；空配置时直接生成 `UIPASS=...` 行 |
+| N8 | `scripts/lvyou pass` 用 `sed "s/.../${pass1}/"` 替换，密码含 `/ & " \ $` 会炸配置 | 改 awk 原子重写 + `mv` 替换；空配置时直接生成 `BMUIPASS=...` 行 |
 | N9 | `lvyou port` 直接就地 `sed -i` 改 systemd unit，中断会留残缺配置 | 改 pass/unit 都先 `cp -a *.bak.<ts>` 备份，配置用临时文件原子替换，unit 仍用 sed 但正则限定 `--port [0-9]{1,5}` |
 | N10 | （review 报告中的"中文乱码截断"项）实际 zip 里 `install.sh:254` / `uninstall.sh:78` 两处 `title` 是完整的 `"安装命令行工具"` / `"删除命令行工具"`，无需修改 | — 无需改动，保留说明 |
 
@@ -28,7 +28,7 @@
 | 编号 | 问题 | 修复点 |
 |-----|------|--------|
 | P0#2 | `ACTIVE_TOKENS: Dict[str, ...]` 是进程内全局，v4/v6 两个 uvicorn 不共享，导致偶发 401 | 新增 `auth_tokens` 表；`_issue/_get/_delete_token` 全部走 SQLite；跨进程自然一致 |
-| P0#3 | 所有对 `device.ip` 的外发 HTTP 没校验，可被当跳板打内网/169.254.169.254 | 新增 `_is_device_ip_allowed()`：必须 private、非 loopback/link-local/metadata，且落在本机 IPv4 接口网段内；所有出站前置 `_ensure_device_ip_allowed()` |
+| P0#3 | 所有对 `device.ip` 的外发 HTTP 没校验，可被当跳板打内网/169.254.169.254 | 新增设备 IP 校验：只允许私有 IPv4，排除 loopback/link-local/metadata |
 | P0#5 | `sh(["bash", "-lc", f"ip ... {iface} ..."])` 走 shell，有注入面 | 全部改 argv（`_run()`），接口名由正则提取，不再拼 shell 字符串 |
 | P0#6 | `BMALLOWORIGINS="*"` + `allow_credentials=True` 组合是悄悄失效的 CSRF 脚坑 | 启动时显式 `RuntimeError`，强制用户要么列出明确 origins 要么保持空 |
 | P1#7 | `ScanState` 只有 `to_dict` 拿锁，其它 `status/progress/results` 赋值全裸写 | 增加 `set_status/set_progress/set_counts/set_results/set_cidr`，全部在 `_lock` 下赋值 |

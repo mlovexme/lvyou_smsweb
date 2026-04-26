@@ -1,11 +1,41 @@
 <script setup>
 import { ref, computed, onMounted } from 'vue'
-import axios from 'axios'
-
-const api = axios.create({ baseURL: '' })
-
-const TOKEN_KEY = 'board_mgr_token'
-const TOKEN_EXPIRES_KEY = 'board_mgr_token_expires'
+import { api } from './api/client'
+import { clearStoredAuth, restoreAuth, saveAuth } from './api/auth'
+import {
+  applyWifiBatch,
+  batchDeleteDevices,
+  checkOtaBatch,
+  deleteDeviceById,
+  dialDevice,
+  fetchDashboard,
+  fetchDeviceDetail,
+  getScanStatus,
+  healthApi,
+  loginApi,
+  logoutApi,
+  previewConfigPreset,
+  previewDeviceConfig,
+  previewWifiBatch,
+  readDeviceConfigs,
+  saveDeviceSim,
+  sendSms,
+  setDeviceAlias,
+  setDeviceGroup,
+  startScan,
+  upgradeOtaBatch,
+  writeConfigPreset,
+  writeDeviceConfig
+} from './api/endpoints'
+import AppHeader from './components/AppHeader.vue'
+import DetailModal from './components/DetailModal.vue'
+import LoginView from './components/LoginView.vue'
+import NoticeBar from './components/NoticeBar.vue'
+import OtaModal from './components/OtaModal.vue'
+import MessagePanel from './components/MessagePanel.vue'
+import StatsGrid from './components/StatsGrid.vue'
+import WifiModal from './components/WifiModal.vue'
+import { displayName, prettyTime } from './utils/format'
 
 const uiPass = ref('')
 const authed = ref(false)
@@ -28,7 +58,6 @@ const dialPhone = ref('')
 const ttsText = ref('')
 
 const selectedIds = ref([])
-const selectAll = ref(false)
 
 const showWifiModal = ref(false)
 const showDetailModal = ref(false)
@@ -53,10 +82,6 @@ const configPreviewData = ref([])
 const configExpandedIds = ref([])
 const configMode = ref('regex')
 
-const scanCidr = ref('')
-const scanUser = ref('admin')
-const scanPass = ref('admin')
-const scanGroup = ref('')
 const scanning = ref(false)
 
 function setNotice(text, type = 'info') {
@@ -65,38 +90,6 @@ function setNotice(text, type = 'info') {
 
 function clearNotice() {
   notice.value = { text: '', type: 'info' }
-}
-
-function setToken(token) {
-  api.defaults.headers.common.Authorization = 'Bearer ' + token
-}
-
-function clearToken() {
-  delete api.defaults.headers.common.Authorization
-}
-
-function saveAuth(token, expiresIn) {
-  const expiresAt = Date.now() + (expiresIn * 1000)
-  localStorage.setItem(TOKEN_KEY, token)
-  localStorage.setItem(TOKEN_EXPIRES_KEY, String(expiresAt))
-  setToken(token)
-}
-
-function clearStoredAuth() {
-  localStorage.removeItem(TOKEN_KEY)
-  localStorage.removeItem(TOKEN_EXPIRES_KEY)
-  clearToken()
-}
-
-function restoreAuth() {
-  const token = localStorage.getItem(TOKEN_KEY)
-  const expiresAt = parseInt(localStorage.getItem(TOKEN_EXPIRES_KEY) || '0', 10)
-  if (!token || !expiresAt || Date.now() >= expiresAt) {
-    clearStoredAuth()
-    return false
-  }
-  setToken(token)
-  return true
 }
 
 // FIX: 登录页新增 HTTP 429 频率限制错误提示
@@ -109,8 +102,7 @@ async function login() {
   loading.value = true
   clearNotice()
   try {
-    const response = await api.post('/api/login', { username: 'admin', password })
-    const data = response.data || {}
+    const data = await loginApi(password)
     saveAuth(data.token, data.expiresIn || 28800)
     authed.value = true
     uiPass.value = ''
@@ -135,7 +127,7 @@ async function login() {
 
 async function logout(showMsg = false) {
   try {
-    await api.post('/api/logout')
+    await logoutApi()
   } catch {
     // ignore
   }
@@ -143,7 +135,6 @@ async function logout(showMsg = false) {
   uiPass.value = ''
   clearStoredAuth()
   selectedIds.value = []
-  selectAll.value = false
   if (showMsg) {
     setNotice('已退出登录', 'info')
   } else {
@@ -166,7 +157,7 @@ onMounted(async () => {
   if (!restoreAuth()) return
   loading.value = true
   try {
-    await api.get('/api/health')
+    await healthApi()
     authed.value = true
     await refresh()
   } catch {
@@ -216,27 +207,12 @@ const filteredNumbers = computed(() => {
   })
 })
 
-function displayName(device) {
-  return (device.alias || '').trim() || device.devId || device.ip
-}
-
-function prettyTime(ts) {
-  if (!ts) return '-'
-  const d = new Date(ts * 1000)
-  return d.toLocaleString('zh-CN', { month: '2-digit', day: '2-digit', hour: '2-digit', minute: '2-digit' })
-}
-
 async function refresh() {
   loading.value = true
   try {
-    const result = await Promise.all([
-      api.get('/api/devices'),
-      api.get('/api/numbers')
-    ])
-    const devData = result[0].data
-    devices.value = Array.isArray(devData) ? devData : (devData.items || [])
-    const numData = result[1].data
-    numbers.value = Array.isArray(numData) ? numData : (numData.items || [])
+    const data = await fetchDashboard()
+    devices.value = data.devices
+    numbers.value = data.numbers
   } catch (e) {
     if (!(e && e.response && e.response.status === 401)) {
       setNotice('获取数据失败，请检查网络连接', 'err')
@@ -251,17 +227,12 @@ function toggleSelectAll() {
   selectedIds.value = isAllSelected ? [] : filteredDevices.value.map(device => device.id)
 }
 
-// FIX: 凭据改为 POST Body；用 completed 标志防止超时误判
 async function startScanAdd() {
+  if (scanning.value) return
   scanning.value = true
   setNotice('正在提交扫描任务...', 'info')
   try {
-    const scanResp = await api.post('/api/scan/start', {
-      cidr:     scanCidr.value  || undefined,
-      group:    scanGroup.value || undefined,
-      user:     scanUser.value,
-      password: scanPass.value
-    })
+    const scanResp = await startScan({})
     const scanId = scanResp.data && scanResp.data.scanId
     if (!scanId) {
       setNotice('扫描任务创建失败', 'err')
@@ -273,7 +244,7 @@ async function startScanAdd() {
     for (let i = 0; i < 60; i++) {
       await new Promise(resolve => setTimeout(resolve, 2000))
       try {
-        const statusResp = await api.get('/api/scan/status/' + scanId)
+        const statusResp = await getScanStatus(scanId)
         const st = statusResp.data || {}
         const progress = st.progress || ''
         if (st.status === 'done') {
@@ -284,6 +255,7 @@ async function startScanAdd() {
         } else if (st.status === 'error') {
           completed = true
           setNotice(progress || '扫描出错', 'err')
+          await refresh()
           break
         } else if (progress) {
           setNotice(`扫描中: ${progress}`, 'info')
@@ -292,7 +264,6 @@ async function startScanAdd() {
         // 状态查询失败，继续重试
       }
     }
-    // FIX: 只在确实未完成时才提示超时
     if (!completed) {
       setNotice('扫描超时，设备可能稍后出现，可点一次刷新确认', 'warn')
       await refresh()
@@ -327,7 +298,7 @@ async function send() {
   }
   loading.value = true
   try {
-    await api.post('/api/sms/send-direct', {
+    await sendSms({
       deviceId: sender.deviceId,
       phone: toPhone.value,
       content: content.value,
@@ -363,7 +334,7 @@ async function dial() {
   }
   loading.value = true
   try {
-    await api.post('/api/tel/dial', {
+    await dialDevice({
       deviceId: sender.deviceId,
       slot: sender.slot,
       phone: dialPhone.value,
@@ -389,7 +360,7 @@ async function renameDevice(device) {
   const name = prompt('请输入设备别名：', device.alias || '')
   if (name === null) return
   try {
-    await api.post('/api/devices/' + device.id + '/alias', { alias: name })
+    await setDeviceAlias(device.id, name)
     setNotice('已更新别名', 'ok')
     await refresh()
   } catch (e) {
@@ -401,7 +372,7 @@ async function setGroup(device) {
   const group = prompt('请输入分组名称：', device.grp || 'auto')
   if (group === null) return
   try {
-    await api.post('/api/devices/' + device.id + '/group', { group })
+    await setDeviceGroup(device.id, group)
     setNotice('已更新分组', 'ok')
     await refresh()
   } catch (e) {
@@ -413,7 +384,7 @@ async function deleteDevice(device) {
   if (!confirm('确认删除设备 ' + displayName(device) + '？')) return
   loading.value = true
   try {
-    await api.delete('/api/devices/' + device.id)
+    await deleteDeviceById(device.id)
     setNotice('已删除', 'ok')
     await refresh()
   } catch (e) {
@@ -459,8 +430,6 @@ function openOtaModal() {
   otaResults.value = []
   otaUpgrading.value = false
   showOtaModal.value = true
-  // 不自动检查版本，改为手动点击「检查版本」
-  // checkOta() // 移除自动检查
 }
 
 function closeOtaModal() {
@@ -471,9 +440,7 @@ function closeOtaModal() {
 async function checkOta() {
   loading.value = true
   try {
-    const response = await api.post('/api/devices/batch/ota/check', {
-      device_ids: selectedIds.value,
-    })
+    const response = await checkOtaBatch(selectedIds.value)
     otaResults.value = response.data && response.data.results ? response.data.results : []
   } catch (e) {
     setNotice((e && e.response && e.response.data && e.response.data.detail) || e.message || '检查失败', 'err')
@@ -494,9 +461,7 @@ async function upgradeOta() {
   otaUpgrading.value = true
   loading.value = true
   try {
-    const response = await api.post('/api/devices/batch/ota/upgrade', {
-      device_ids: selectedIds.value,
-    })
+    const response = await upgradeOtaBatch(selectedIds.value)
     const results = response.data && response.data.results ? response.data.results : []
     const okCount = results.filter(r => r.ok).length
     setNotice('OTA升级完成：' + okCount + '/' + results.length, okCount ? 'ok' : 'err')
@@ -540,9 +505,7 @@ async function readConfigs() {
   }
   loading.value = true
   try {
-    const resp = await api.post('/api/devices/batch/config/read', {
-      device_ids: selectedIds.value
-    })
+    const resp = await readDeviceConfigs(selectedIds.value)
     configData.value = resp.data && resp.data.configs ? resp.data.configs : []
     configStep.value = 'edit'
     const firstOk = configData.value.find(item => item.ok)
@@ -571,7 +534,7 @@ async function previewConfig() {
   }
   loading.value = true
   try {
-    const resp = await api.post('/api/devices/batch/config/preview', {
+    const resp = await previewDeviceConfig({
       device_ids: selectedIds.value,
       pattern: configPattern.value,
       replacement: configReplacement.value,
@@ -593,10 +556,7 @@ async function previewConfig() {
 async function previewCleanMessageTemplates() {
   loading.value = true
   try {
-    const resp = await api.post('/api/devices/batch/config/preset/preview', {
-      device_ids: selectedIds.value,
-      preset: 'clean_message_templates'
-    })
+    const resp = await previewConfigPreset(selectedIds.value, 'clean_message_templates')
     configPreviewData.value = resp.data && resp.data.previews ? resp.data.previews : []
     configStep.value = 'preview'
     configMode.value = 'clean_message_templates'
@@ -623,8 +583,8 @@ async function writeConfigs() {
   try {
     const payload = { device_ids: selectedIds.value }
     const resp = configMode.value === 'clean_message_templates'
-      ? await api.post('/api/devices/batch/config/preset/write', { ...payload, preset: 'clean_message_templates' })
-      : await api.post('/api/devices/batch/config/write', {
+      ? await writeConfigPreset(selectedIds.value, 'clean_message_templates')
+      : await writeDeviceConfig({
         ...payload,
         pattern: configPattern.value,
         replacement: configReplacement.value,
@@ -671,7 +631,7 @@ async function previewWifi() {
   }
   loading.value = true
   try {
-    const response = await api.post('/api/devices/batch/wifi/preview', {
+    const response = await previewWifiBatch({
       device_ids: selectedIds.value,
       ssid: wifiSsid.value.trim(),
       pwd: wifiPwd.value.trim()
@@ -695,12 +655,9 @@ async function applyWifi() {
     setNotice('请先勾选设备', 'err')
     return
   }
-  // FIX(N7): preview is now optional — it really queries each device's
-  // current WiFi so it is still useful, but we no longer block the apply
-  // action when the operator chose to skip the preview step.
   loading.value = true
   try {
-    const response = await api.post('/api/devices/batch/wifi', {
+    const response = await applyWifiBatch({
       device_ids: selectedIds.value,
       ssid: wifiSsid.value.trim(),
       pwd: wifiPwd.value.trim()
@@ -725,11 +682,10 @@ async function batchDeleteSelected() {
   if (!confirm('确认删除所选 ' + selectedCount.value + ' 台设备？')) return
   loading.value = true
   try {
-    const response = await api.post('/api/devices/batch/delete', { device_ids: selectedIds.value })
+    const response = await batchDeleteDevices(selectedIds.value)
     const deleted = response.data && response.data.deleted ? response.data.deleted : 0
     setNotice('删除完成：' + deleted + '/' + selectedCount.value, deleted ? 'ok' : 'warn')
     selectedIds.value = []
-    selectAll.value = false
     await refresh()
   } catch (e) {
     setNotice((e && e.response && e.response.data && e.response.data.detail) || e.message || '删除失败', 'err')
@@ -741,7 +697,7 @@ async function batchDeleteSelected() {
 async function showDetail(device) {
   loading.value = true
   try {
-    const response = await api.get('/api/devices/' + device.id + '/detail')
+    const response = await fetchDeviceDetail(device.id)
     deviceDetail.value = response.data
     showDetailModal.value = true
   } catch (e) {
@@ -761,7 +717,7 @@ async function saveSimSingle() {
   if (!id) return
   loading.value = true
   try {
-    await api.post('/api/devices/' + id + '/sim', {
+    await saveDeviceSim(id, {
       sim1: deviceDetail.value.device.sim1number || '',
       sim2: deviceDetail.value.device.sim2number || ''
     })
@@ -774,82 +730,32 @@ async function saveSimSingle() {
   }
 }
 
-function wifiDbmColor(dbm) {
-  const v = parseInt(dbm, 10)
-  if (isNaN(v)) return 'var(--text-secondary)'
-  if (v >= 60) return 'var(--success)'
-  if (v >= 30) return 'var(--warning)'
-  return 'var(--danger)'
-}
-
-function wifiDbmLabel(dbm) {
-  const v = parseInt(dbm, 10)
-  if (isNaN(v) || !dbm) return '-'
-  if (v >= 60) return `${dbm} (强)`
-  if (v >= 30) return `${dbm} (中)`
-  return `${dbm} (弱)`
+function updateDetailSim(field, value) {
+  if (deviceDetail.value && deviceDetail.value.device) {
+    deviceDetail.value.device[field] = value
+  }
 }
 </script>
 
 <template>
   <div class="app">
-    <div v-if="!authed" class="login-container">
-      <div class="login-box">
-        <div class="login-icon" aria-hidden="true">
-          <svg viewBox="0 0 24 24" fill="currentColor">
-            <path d="M12 2C6.48 2 2 6.48 2 12s4.48 10 10 10 10-4.48 10-10S17.52 2 12 2zm0 18c-4.42 0-8-3.58-8-8s3.58-8 8-8 8 3.58 8 8-3.58 8-8 8z" />
-            <path d="M12 6a2 2 0 100 4 2 2 0 000-4zm-4 8a4 4 0 118 0v1H8v-1z" />
-          </svg>
-        </div>
-        <h1 class="login-title">控制台</h1>
-        <p class="login-subtitle">请输入密码登录系统</p>
-        <div class="login-form">
-          <input
-            v-model="uiPass"
-            class="login-input"
-            type="password"
-            placeholder="请输入密码"
-            @keyup.enter="login"
-            autocomplete="current-password"
-          />
-          <button class="login-button" :disabled="loading" @click="login">
-            <span v-if="loading">验证中...</span>
-            <span v-else>登 录</span>
-          </button>
-        </div>
-        <div v-if="notice.text" class="login-notice" :class="'notice-' + notice.type">
-          {{ notice.text }}
-        </div>
-      </div>
-    </div>
+    <LoginView
+      v-if="!authed"
+      v-model:password="uiPass"
+      :loading="loading"
+      :notice="notice"
+      @login="login"
+    />
 
     <div v-else class="main-container">
-      <header class="header">
-        <div class="header-left">
-          <div class="logo" aria-hidden="true">
-            <svg viewBox="0 0 24 24" fill="currentColor">
-              <path d="M12 2C6.48 2 2 6.48 2 12s4.48 10 10 10 10-4.48 10-10S17.52 2 12 2zm0 18c-4.42 0-8-3.58-8-8s3.58-8 8-8 8 3.58 8 8-3.58 8-8 8z" />
-              <path d="M12 6a2 2 0 100 4 2 2 0 000-4zm-4 8a4 4 0 118 0v1H8v-1z" />
-            </svg>
-          </div>
-          <div class="header-title">
-            <h1>控制台</h1>
-            <p>管理中心</p>
-          </div>
-        </div>
-        <div class="header-right">
-          <button class="header-btn primary" @click="startScanAdd" :disabled="scanning">
-            {{ scanning ? '扫描中...' : '扫描' }}
-          </button>
-          <button class="header-btn" @click="refresh" :disabled="loading">刷新</button>
-          <button class="header-btn logout" @click="logout(true)">退出</button>
-        </div>
-      </header>
-
-      <div v-if="notice.text" class="notice-bar" :class="'notice-' + notice.type">
-        <span>{{ notice.text }}</span>
-        <button class="notice-close" @click="clearNotice">×</button>
-      </div>
+      <AppHeader
+        :loading="loading"
+        :scanning="scanning"
+        @scan="startScanAdd"
+        @refresh="refresh"
+        @logout="logout(true)"
+      />
+      <NoticeBar :notice="notice" @close="clearNotice" />
 
       <div v-if="showConfigModal" class="modal-overlay" @click.self="closeConfigModal">
         <div class="modal modal-xl">
@@ -929,82 +835,25 @@ function wifiDbmLabel(dbm) {
         </div>
       </div>
 
-      <div class="stats-grid">
-        <div class="stat-card online">
-          <div class="stat-icon" aria-hidden="true"><span class="stat-dot stat-dot-online"></span></div>
-          <div class="stat-info">
-            <div class="stat-value">{{ onlineCount }}</div>
-            <div class="stat-label">在线</div>
-          </div>
-        </div>
-        <div class="stat-card offline">
-          <div class="stat-icon" aria-hidden="true"><span class="stat-dot stat-dot-offline"></span></div>
-          <div class="stat-info">
-            <div class="stat-value">{{ offlineCount }}</div>
-            <div class="stat-label">离线</div>
-          </div>
-        </div>
-        <div class="stat-card total">
-          <div class="stat-icon" aria-hidden="true">
-            <svg viewBox="0 0 24 24" fill="currentColor"><path d="M17 2H7a2 2 0 00-2 2v16a2 2 0 002 2h10a2 2 0 002-2V4a2 2 0 00-2-2zm-5 19a1 1 0 110-2 1 1 0 010 2zm5-4H7V5h10v12z"/></svg>
-          </div>
-          <div class="stat-info">
-            <div class="stat-value">{{ devices.length }}</div>
-            <div class="stat-label">设备</div>
-          </div>
-        </div>
-        <div class="stat-card sim">
-          <div class="stat-icon" aria-hidden="true">
-            <svg viewBox="0 0 24 24" fill="currentColor"><path d="M19 3H9l-6 6v10a2 2 0 002 2h14a2 2 0 002-2V5a2 2 0 00-2-2zm-2 14H7v-2h10v2zm0-4H7v-2h10v2zm0-4h-4V6h4v3z"/></svg>
-          </div>
-          <div class="stat-info">
-            <div class="stat-value">{{ numbers.length }}</div>
-            <div class="stat-label">SIM卡</div>
-          </div>
-        </div>
-      </div>
+      <StatsGrid
+        :online="onlineCount"
+        :offline="offlineCount"
+        :total="devices.length"
+        :sim-count="numbers.length"
+      />
 
-      <div class="sms-section">
-        <div class="section-header">
-          <h2>消息发送</h2>
-          <div class="mode-tabs">
-            <button :class="['mode-tab', { active: commMode === 'sms' }]" @click="commMode = 'sms'">短信</button>
-            <button :class="['mode-tab', { active: commMode === 'dial' }]" @click="commMode = 'dial'">拨号</button>
-          </div>
-        </div>
-
-        <div v-show="commMode === 'sms'" class="form-grid">
-          <select v-model="fromSelected" class="form-select">
-            <option value="">选择发送卡号</option>
-            <option
-              v-for="n in numbers"
-              :key="String(n.deviceId) + '-' + String(n.slot)"
-              :value="String(n.deviceId) + '|' + String(n.slot)"
-            >
-              {{ n.number }} ({{ n.operator || '未知' }})
-            </option>
-          </select>
-          <input v-model="toPhone" class="form-input" placeholder="收件人号码" />
-          <textarea v-model="content" class="form-textarea" placeholder="短信内容..." rows="2"></textarea>
-          <button class="btn-send" :disabled="loading || !fromSelected || !toPhone || !content" @click="send">发送</button>
-        </div>
-
-        <div v-show="commMode === 'dial'" class="form-grid">
-          <select v-model="fromSelected" class="form-select">
-            <option value="">选择发送卡号</option>
-            <option
-              v-for="n in numbers"
-              :key="String(n.deviceId) + '-' + String(n.slot)"
-              :value="String(n.deviceId) + '|' + String(n.slot)"
-            >
-              {{ n.number }} ({{ n.operator || '未知' }})
-            </option>
-          </select>
-          <input v-model="dialPhone" class="form-input" placeholder="拨打的号码" />
-          <textarea v-model="ttsText" class="form-textarea" placeholder="TTS内容（可选）..." rows="2"></textarea>
-          <button class="btn-send" :disabled="loading || !fromSelected || !dialPhone" @click="dial">拨号</button>
-        </div>
-      </div>
+      <MessagePanel
+        v-model:mode="commMode"
+        v-model:sender="fromSelected"
+        v-model:to-phone="toPhone"
+        v-model:content="content"
+        v-model:dial-phone="dialPhone"
+        v-model:tts-text="ttsText"
+        :numbers="numbers"
+        :loading="loading"
+        @send="send"
+        @dial="dial"
+      />
 
       <div class="toolbar">
         <div class="toolbar-left">
@@ -1038,7 +887,7 @@ function wifiDbmLabel(dbm) {
             {{ selectedCount > 0 ? `已选择 ${selectedCount} 台` : '全选' }}
           </span>
         </label>
-        <button v-if="selectedCount > 0" class="batch-cancel" @click="selectedIds = []; selectAll = false">取消选择</button>
+        <button v-if="selectedCount > 0" class="batch-cancel" @click="selectedIds = []">取消选择</button>
       </div>
 
       <div class="tab-bar">
@@ -1147,124 +996,36 @@ function wifiDbmLabel(dbm) {
         </table>
       </div>
 
-      <div v-if="showWifiModal" class="modal-overlay" @click.self="closeWifiModal">
-        <div class="modal">
-          <div class="modal-header">
-            <h3>批量配置 WiFi</h3>
-            <button class="modal-close" @click="closeWifiModal">×</button>
-          </div>
-          <div class="modal-body">
-            <input v-model="wifiSsid" class="form-input" placeholder="WiFi 名称 (SSID)" />
-            <input v-model="wifiPwd" class="form-input" type="password" placeholder="WiFi 密码" autocomplete="off" />
-            
-            <!-- 预览结果区域 -->
-            <div v-if="wifiPreviewResults.length > 0" class="preview-section">
-              <h4>预览结果（不写入设备）：</h4>
-              <div class="preview-list">
-                <div v-for="result in wifiPreviewResults" :key="result.id" class="preview-item">
-                  <span class="preview-ip">{{ result.ip }}</span>
-                  <span class="preview-alias">{{ result.alias || '(无别名)' }}</span>
-                  <span class="preview-status">WiFi将改为: {{ result.new_wifi }}</span>
-                </div>
-              </div>
-            </div>
-          </div>
-          <div class="modal-footer">
-            <button class="btn-cancel" @click="closeWifiModal">取消</button>
-            <button class="btn-preview" @click="previewWifi" :disabled="loading">预览</button>
-            <button class="btn-confirm" @click="applyWifi" :disabled="loading">确认执行</button>
-          </div>
-        </div>
-      </div>
+      <WifiModal
+        v-if="showWifiModal"
+        v-model:ssid="wifiSsid"
+        v-model:password="wifiPwd"
+        :results="wifiPreviewResults"
+        :loading="loading"
+        @preview="previewWifi"
+        @apply="applyWifi"
+        @close="closeWifiModal"
+      />
 
-      <!-- OTA升级模态框 -->
-      <div v-if="showOtaModal" class="modal-overlay" @click.self="closeOtaModal">
-        <div class="modal modal-lg">
-          <div class="modal-header">
-            <h3>批量 OTA 升级</h3>
-            <button class="modal-close" @click="closeOtaModal">×</button>
-          </div>
-          <div class="modal-body">
-            <!-- 添加检查版本按钮 -->
-            <div v-if="otaResults.length === 0" class="ota-check-section">
-              <p>点击按钮检查选中设备的版本信息</p>
-              <button class="btn-check" @click="checkOta" :disabled="loading">
-                {{ loading ? '正在检查...' : '检查版本' }}
-              </button>
-            </div>
-            
-            <div v-if="loading && otaResults.length === 0" class="ota-loading">
-              <p>正在检查版本...</p>
-            </div>
-            <div v-else-if="otaResults.length > 0" class="ota-results">
-              <div class="ota-summary">
-                <span class="ota-updatable">{{ otaResults.filter(r => r.ok && r.hasUpdate).length }} 台可升级</span>
-                <span class="ota-latest">{{ otaResults.filter(r => r.ok && !r.hasUpdate).length }} 台已是最新</span>
-                <span class="ota-failed">{{ otaResults.filter(r => !r.ok).length }} 台检查失败</span>
-              </div>
-              <div class="ota-list">
-                <div v-for="r in otaResults" :key="r.id" class="ota-item" :class="{ 'has-update': r.ok && r.hasUpdate, 'failed': !r.ok }">
-                  <div class="ota-ip">{{ r.ip }}</div>
-                  <div class="ota-version">
-                    <span v-if="r.ok && r.hasUpdate">
-                      <span class="version-current">{{ r.currentVer || '-' }}</span>
-                      <span class="version-arrow">→</span>
-                      <span class="version-new">{{ r.newVer }}</span>
-                    </span>
-                    <span v-else-if="r.ok">已是最新: {{ r.currentVer || '-' }}</span>
-                    <span v-else class="version-error">{{ r.error || '检查失败' }}</span>
-                  </div>
-                </div>
-              </div>
-            </div>
-          </div>
-          <div class="modal-footer">
-            <button class="btn-cancel" @click="closeOtaModal">关闭</button>
-            <button class="btn-upgrade" @click="upgradeOta" :disabled="loading || otaUpgrading || !otaResults.filter(r => r.ok && r.hasUpdate).length">
-              {{ otaUpgrading ? '升级中...' : '升级' }}
-            </button>
-          </div>
-        </div>
-      </div>
+      <OtaModal
+        v-if="showOtaModal"
+        :results="otaResults"
+        :loading="loading"
+        :upgrading="otaUpgrading"
+        @check="checkOta"
+        @upgrade="upgradeOta"
+        @close="closeOtaModal"
+      />
 
-      <div v-if="showDetailModal && deviceDetail" class="modal-overlay" @click.self="closeDetailModal">
-        <div class="modal">
-          <div class="modal-header">
-            <h3>📋 设备详情</h3>
-            <button class="modal-close" @click="closeDetailModal">×</button>
-          </div>
-          <div class="modal-body">
-            <div class="detail-grid">
-              <div class="detail-item"><span class="detail-label">设备ID</span><span>{{ deviceDetail.device && deviceDetail.device.devId || '-' }}</span></div>
-              <div class="detail-item"><span class="detail-label">别名</span><span>{{ deviceDetail.device && deviceDetail.device.alias || '-' }}</span></div>
-              <div class="detail-item"><span class="detail-label">IP 地址</span><span class="mono">{{ deviceDetail.device && deviceDetail.device.ip }}</span></div>
-              <div class="detail-item"><span class="detail-label">MAC 地址</span><span class="mono">{{ deviceDetail.device && deviceDetail.device.mac || '-' }}</span></div>
-              <div class="detail-item"><span class="detail-label">分组</span><span>{{ deviceDetail.device && deviceDetail.device.grp || 'auto' }}</span></div>
-              <div class="detail-item">
-                <span class="detail-label">状态</span>
-                <span :class="['status-badge', deviceDetail.device && deviceDetail.device.status]">
-                  {{ deviceDetail.device && deviceDetail.device.status === 'online' ? '在线' : '离线' }}
-                </span>
-              </div>
-              <div class="detail-item"><span class="detail-label">SIM1 号码</span><span class="mono">{{ deviceDetail.device && deviceDetail.device.sim1number || '-' }}</span></div>
-              <div class="detail-item"><span class="detail-label">SIM1 运营商</span><span>{{ deviceDetail.device && deviceDetail.device.sim1operator || '-' }}</span></div>
-              <div class="detail-item"><span class="detail-label">SIM2 号码</span><span class="mono">{{ deviceDetail.device && deviceDetail.device.sim2number || '-' }}</span></div>
-              <div class="detail-item"><span class="detail-label">SIM2 运营商</span><span>{{ deviceDetail.device && deviceDetail.device.sim2operator || '-' }}</span></div>
-              <div class="detail-item"><span class="detail-label">WiFi 名称</span><span>{{ deviceDetail.device && deviceDetail.device.wifiName || '-' }}</span></div>
-              <div class="detail-item"><span class="detail-label">信号强度</span><span :style="{ color: wifiDbmColor(deviceDetail.device && deviceDetail.device.wifiDbm) }">{{ wifiDbmLabel(deviceDetail.device && deviceDetail.device.wifiDbm) }}</span></div>
-            </div>
-            <div class="sim-edit-section">
-              <p class="sim-edit-title">编辑 SIM 卡号</p>
-              <input v-model="deviceDetail.device.sim1number" class="form-input" placeholder="SIM1 号码" />
-              <input v-model="deviceDetail.device.sim2number" class="form-input" placeholder="SIM2 号码" />
-              <button class="btn-confirm" @click="saveSimSingle" :disabled="loading">保存卡号</button>
-            </div>
-          </div>
-          <div class="modal-footer">
-            <button class="btn-cancel" @click="closeDetailModal">关闭</button>
-          </div>
-        </div>
-      </div>
+      <DetailModal
+        v-if="showDetailModal && deviceDetail"
+        :detail="deviceDetail"
+        :loading="loading"
+        @update-sim1="updateDetailSim('sim1number', $event)"
+        @update-sim2="updateDetailSim('sim2number', $event)"
+        @save="saveSimSingle"
+        @close="closeDetailModal"
+      />
     </div>
   </div>
 </template>
@@ -1381,7 +1142,6 @@ body {
 .toolbar-btn.danger { color: var(--danger); }
 .toolbar-btn:disabled { opacity: 0.5; cursor: not-allowed; }
 
-.batch-bar { background: var(--primary); color: white; padding: 10px 16px; border-radius: 8px; margin-bottom: 12px; display: flex; justify-content: space-between; align-items: center; }
 .batch-cancel { background: rgba(255,255,255,0.2); border: none; color: white; padding: 5px 12px; border-radius: 6px; cursor: pointer; }
 
 .select-bar { background: var(--bg-card); padding: 10px 16px; border-radius: 8px; margin-bottom: 12px; display: flex; justify-content: space-between; align-items: center; border: 1px solid var(--border); }
@@ -1449,13 +1209,12 @@ body {
 .modal-header h3 { font-size: 17px; font-weight: 600; }
 .modal-close { background: none; border: none; color: var(--text-secondary); font-size: 24px; cursor: pointer; }
 .modal-body { padding: 20px; display: flex; flex-direction: column; gap: 10px; }
+.modal-hint { color: var(--text-secondary); font-size: 12px; line-height: 1.5; }
 .modal-footer { display: flex; gap: 12px; padding: 16px 20px; border-top: 1px solid var(--border); }
 
-.form-input, .form-select-full, .form-textarea-full { width: 100%; background: var(--bg-dark); border: 1px solid var(--border); border-radius: 8px; padding: 11px 14px; color: var(--text-primary); font-size: 14px; outline: none; }
-.form-input:focus, .form-select-full:focus, .form-textarea-full:focus { border-color: var(--primary); }
+.form-input, .form-textarea-full { width: 100%; background: var(--bg-dark); border: 1px solid var(--border); border-radius: 8px; padding: 11px 14px; color: var(--text-primary); font-size: 14px; outline: none; }
+.form-input:focus, .form-textarea-full:focus { border-color: var(--primary); }
 .form-textarea-full { resize: vertical; font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; line-height: 1.45; }
-.form-group { display: flex; flex-direction: column; gap: 6px; }
-.form-label { font-size: 13px; color: var(--text-secondary); }
 .config-section { display: flex; flex-direction: column; gap: 8px; }
 .config-intro, .config-flow { display: flex; flex-direction: column; gap: 12px; }
 .config-info, .config-hint { color: var(--text-secondary); font-size: 13px; line-height: 1.6; }
@@ -1498,9 +1257,6 @@ body {
 .btn-check:hover:not(:disabled) { background: var(--primary-dark); }
 .btn-check:disabled { opacity: 0.5; cursor: not-allowed; }
 
-.btn-refresh { background: var(--bg-dark); border: 1px solid var(--border); color: var(--text-primary); padding: 11px; border-radius: 8px; cursor: pointer; }
-.btn-refresh:hover:not(:disabled) { background: var(--bg-card-hover); }
-.btn-refresh:disabled { opacity: 0.5; cursor: not-allowed; }
 .btn-upgrade { background: var(--success); border: none; color: white; padding: 11px; border-radius: 8px; font-weight: 500; cursor: pointer; }
 .btn-upgrade:hover:not(:disabled) { background: #0d9668; }
 .btn-upgrade:disabled { opacity: 0.5; cursor: not-allowed; }

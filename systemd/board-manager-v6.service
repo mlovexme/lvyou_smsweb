@@ -7,11 +7,8 @@ Type=simple
 WorkingDirectory={{APPDIR}}
 Environment=BMDB={{APPDIR}}/data/data.db
 Environment=BMSTATIC={{APPDIR}}/static
-Environment=BMDEVUSER={{SCANUSER}}
-Environment=BMDEVPASS={{SCANPASS}}
-Environment=BMUIUSER=admin
-Environment=BMUIPASS={{UIPASS}}
-ExecStart={{APPDIR}}/venv/bin/python -m uvicorn main:app --app-dir {{APPDIR}}/app --host :: --port {{APIPORT}}
+EnvironmentFile={{CONFIG_FILE}}
+ExecStart={{APPDIR}}/venv/bin/python -m uvicorn backend.main:app --app-dir {{APPDIR}}/app --host :: --port {{APIPORT}}
 Restart=always
 RestartSec=2
 User=root

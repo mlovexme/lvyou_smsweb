@@ -36,8 +36,8 @@ logger.setLevel(logging.DEBUG if os.environ.get("BMDEBUG") else logging.INFO)
 
 DBPATH      = os.environ.get("BMDB",      "/opt/board-manager/data/data.db")
 STATICDIR   = os.environ.get("BMSTATIC",  "/opt/board-manager/static")
-DEFAULTUSER = os.environ.get("BMDEVUSER", "admin")
-DEFAULTPASS = os.environ.get("BMDEVPASS", "admin")
+DEFAULTUSER = "admin"
+DEFAULTPASS = "admin"
 TIMEOUT            = float(os.environ.get("BMHTTPTIMEOUT",    "5.0"))
 CONCURRENCY        = int(os.environ.get("BMSCANCONCURRENCY", "64"))
 TCP_CONCURRENCY    = int(os.environ.get("BMTCPCONCURRENCY",  "128"))
@@ -72,7 +72,7 @@ class Device(Base):
     devId        = Column(String(128), unique=True, nullable=True)
     grp          = Column(String(64),  default="auto")
     ip           = Column(String(45),  unique=True, index=True, nullable=False)
-    mac          = Column(String(32),  unique=True, nullable=True, default="")
+    mac          = Column(String(32),  unique=True, nullable=True, default=None)
     user         = Column(String(64),  default="")
     passwd       = Column(String(64),  default="")
     status       = Column(String(32),  default="unknown")
@@ -260,6 +260,7 @@ def _run_migrations():
             cols = [r[1] for r in rows]
             if col not in cols:
                 conn.execute(text(f"ALTER TABLE {table} ADD COLUMN {col} {coltype}"))
+        conn.execute(text("UPDATE devices SET mac = NULL WHERE mac = ''"))
         conn.commit()
 
 
@@ -571,11 +572,6 @@ def _local_ipv4_networks() -> List[IPv4Network]:
     return nets
 
 
-# FIX(P0#3): whitelist before any outbound request to a device. A device.ip
-# value either comes from scanning a local subnet or from operator input; in
-# neither case should the backend be tricked into fetching public / metadata
-# endpoints on its behalf. We accept only private addresses and — more
-# strictly — IPs that fall in one of the local interface subnets.
 def _is_device_ip_allowed(ip: str) -> bool:
     try:
         addr = ip_address(ip)
@@ -584,15 +580,7 @@ def _is_device_ip_allowed(ip: str) -> bool:
     if isinstance(addr, IPv4Address):
         if addr.is_loopback or addr.is_link_local or addr.is_multicast or addr.is_unspecified or addr.is_reserved:
             return False
-        if not addr.is_private:
-            return False
-        nets = _local_ipv4_networks()
-        if not nets:
-            return True
-        for net in nets:
-            if addr in net:
-                return True
-        return False
+        return addr.is_private
     if isinstance(addr, IPv6Address):
         if addr.is_loopback or addr.is_link_local or addr.is_multicast or addr.is_unspecified or addr.is_reserved:
             return False
@@ -860,7 +848,7 @@ def upsertdevice(db: Session, ip: str, mac: str, user: str, pw: str, grp: Option
         if grp is not None and str(grp).strip():
             device.grp = grp
         device.ip          = ip
-        device.mac         = mac if mac else device.mac
+        device.mac         = mac if mac else (device.mac or None)
         device.user        = user
         device.passwd      = pw
         device.status      = "online"
@@ -876,7 +864,7 @@ def upsertdevice(db: Session, ip: str, mac: str, user: str, pw: str, grp: Option
     else:
         device = Device(
             devId=devid, grp=(grp if grp is not None and str(grp).strip() else "auto"),
-            ip=ip, mac=(mac or ""), user=user, passwd=pw, status="online", lastSeen=nowts(),
+            ip=ip, mac=mac, user=user, passwd=pw, status="online", lastSeen=nowts(),
             sim1number=sim1num, sim1operator=sim1op, sim1signal=sim1sig,
             sim2number=sim2num, sim2operator=sim2op, sim2signal=sim2sig,
             firmware_version=fw_ver,
@@ -889,7 +877,7 @@ def upsertdevice(db: Session, ip: str, mac: str, user: str, pw: str, grp: Option
     except Exception as exc:
         db.rollback()
         logger.warning("upsert %s failed: %s", ip, exc)
-        return {"ip": ip, "error": "数据库写入失败"}
+        return {"ip": ip, "error": f"数据库写入失败: {exc}"}
     db.refresh(device)
     return _device_to_dict(device)
 
@@ -1263,14 +1251,23 @@ def _run_scan_bg(scan_id: str, cidr: str, group: Optional[str], user: str, passw
         db = SessionLocal()
         try:
             saved: List[Dict[str, Any]] = []
+            failed: List[Dict[str, Any]] = []
             for item in state.results:
                 try:
-                    d = upsertdevice(db, item["ip"], item["mac"], user, password, item.get("grp"))
-                    saved.append(d)
+                    d = upsertdevice(db, item["ip"], item["mac"], DEFAULTUSER, DEFAULTPASS, item.get("grp"))
+                    if d.get("error"):
+                        failed.append(d)
+                    else:
+                        saved.append(d)
                 except Exception as exc:
+                    failed.append({"ip": item["ip"], "error": str(exc)})
                     logger.warning("save device %s failed: %s", item["ip"], exc)
             state.set_results(saved)
-            state.set_status("done", f"完成，发现 {len(saved)} 台设备")
+            if failed:
+                failed_text = "；".join(f"{x.get('ip', '')}: {x.get('error', '')}" for x in failed[:3])
+                state.set_status("error", f"发现 {len(saved) + len(failed)} 台，成功添加 {len(saved)} 台，失败 {len(failed)} 台：{failed_text}")
+            else:
+                state.set_status("done", f"完成，发现 {len(saved)} 台设备")
         finally:
             db.close()
     except Exception as exc:
