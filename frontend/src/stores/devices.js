@@ -98,9 +98,11 @@ export const useDevicesStore = defineStore('devices', () => {
           pageSize: numbersPageSize.value,
           q: searchText.value.trim()
         }),
-        // Unfiltered, large page so the sender dropdown shows every SIM
-        // regardless of what the user typed in the search box.
-        fetchNumbersPage({ page: 1, pageSize: 5000 }),
+        // Unfiltered, server-max-sized page so the sender dropdown
+        // shows every SIM regardless of pagination / search filter.
+        // 1000 matches DEVICES_MAX_PAGE_SIZE on the backend; anything
+        // larger triggers a 422 and breaks the whole Promise.all.
+        fetchNumbersPage({ page: 1, pageSize: 1000 }),
         fetchDeviceGroups()
       ])
       devices.value = devPage.items
