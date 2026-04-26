@@ -52,7 +52,11 @@ UIUSER             = os.environ.get("BMUIUSER",  "admin")
 # server refuses to start unless BMUIPASS is explicitly set to a non-default
 # value (override with BMINSECURE_DEFAULT_PASSWORD=1 for local development).
 UIPASS             = os.environ.get("BMUIPASS",  "")
-TOKEN_TTL_SECONDS  = int(os.environ.get("BMTOKENTTL", str(8 * 60 * 60)))
+# FIX(P1#10): shorten default token lifetime from 8h to 2h. Combined with
+# the SPA moving the token from localStorage to sessionStorage, this caps
+# how long a stolen token (XSS, leaked browser) is useful before the user
+# must re-authenticate. Operators can still override via BMTOKENTTL.
+TOKEN_TTL_SECONDS  = int(os.environ.get("BMTOKENTTL", str(2 * 60 * 60)))
 PREWARM_CONCURRENCY = int(os.environ.get("BMPREWARMCONCURRENCY", "64"))
 OTA_BATCH_MAX      = int(os.environ.get("BMOTABATCHMAX",       "64"))
 CONFIG_MAX_CHARS   = int(os.environ.get("BMCONFIGMAXCHARS",    "524288"))
