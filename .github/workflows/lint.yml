@@ -58,6 +58,32 @@ jobs:
           mkdir -p /tmp/import-smoke-static
           python -c "import importlib; m = importlib.import_module('backend.main'); print('imported', m.__file__)"
 
+  python-tests:
+    # FIX(P2#9): pytest unit-test job. Covers the security-critical
+    # helpers (login credential check, SSRF allow-list, regex timeout,
+    # rate limiter, trusted-proxy XFF resolution).
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Install backend deps
+        run: |
+          pip install -r backend/requirements.txt
+          pip install pytest pytest-timeout
+
+      - name: pytest
+        env:
+          BMINSECURE_DEFAULT_PASSWORD: "1"
+          BMDB: "/tmp/pytest.db"
+          BMSTATIC: "/tmp/pytest-static"
+        run: |
+          mkdir -p /tmp/pytest-static
+          python -m pytest
+
   frontend-build:
     runs-on: ubuntu-latest
     steps:
