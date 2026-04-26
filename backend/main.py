@@ -1157,13 +1157,20 @@ def apidevices(
     query = db.query(Device).order_by(Device.created.desc(), Device.id.desc())
     query = _apply_devices_filter(query, q, group)
     total = query.count()
+    # FIX(P2#7, Devin Review #8): online/offline counts must be computed
+    # against the full filtered set, not just the visible page, so the
+    # dashboard header (online + offline = total) doesn't drift once
+    # there are multiple pages.
+    online = query.filter(Device.status == "online").count()
     items = query.offset((page - 1) * page_size).limit(page_size).all()
     return {
-        "items":     [_device_to_dict(d) for d in items],
-        "total":     total,
-        "page":      page,
-        "page_size": page_size,
-        "pages":     (total + page_size - 1) // page_size if total else 0,
+        "items":         [_device_to_dict(d) for d in items],
+        "total":         total,
+        "online_count":  online,
+        "offline_count": max(total - online, 0),
+        "page":          page,
+        "page_size":     page_size,
+        "pages":         (total + page_size - 1) // page_size if total else 0,
     }
 
 

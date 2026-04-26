@@ -32,6 +32,8 @@ export async function fetchDevicesPage({ page = 1, pageSize = 100, q = '', group
   return {
     items: data.items || [],
     total: data.total || 0,
+    onlineCount: data.online_count || 0,
+    offlineCount: data.offline_count || 0,
     page: data.page || page,
     pageSize: data.page_size || pageSize,
     pages: data.pages || 0

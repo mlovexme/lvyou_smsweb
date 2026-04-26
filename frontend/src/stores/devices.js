@@ -38,6 +38,12 @@ export const useDevicesStore = defineStore('devices', () => {
 
   const devicesTotal = ref(0)
   const numbersTotal = ref(0)
+  // FIX(P2#7, Devin Review #8): online/offline computed from
+  // devices.value would only reflect the current page, drifting from
+  // devicesTotal once there are multiple pages. Backend now returns
+  // these as global counts in the response envelope.
+  const devicesOnline = ref(0)
+  const devicesOffline = ref(0)
   const devicesPage = ref(1)
   const devicesPageSize = ref(DEFAULT_PAGE_SIZE)
   const devicesPages = ref(0)
@@ -59,17 +65,11 @@ export const useDevicesStore = defineStore('devices', () => {
     return Array.from(seen)
   })
 
-  // Online / offline counts now reflect the visible page only -- a tiny
-  // semantic change vs the old "every device" count, but it matches what
-  // the user sees and avoids a second full-table query just for the
-  // header. If we later want global counts, expose them in the response
-  // envelope.
-  const onlineCount = computed(
-    () => devices.value.filter(d => d.status === 'online').length
-  )
-  const offlineCount = computed(
-    () => devices.value.filter(d => d.status !== 'online').length
-  )
+  // Online / offline are global filtered counts coming from the backend
+  // envelope, so the StatsGrid header satisfies online + offline = total
+  // even when the visible page only shows a subset.
+  const onlineCount = computed(() => devicesOnline.value)
+  const offlineCount = computed(() => devicesOffline.value)
   const selectedCount = computed(() => selectedIds.value.length)
 
   // FIX(P2#7): preserved as identity getters so App.vue / child components
@@ -102,6 +102,8 @@ export const useDevicesStore = defineStore('devices', () => {
       ])
       devices.value = devPage.items
       devicesTotal.value = devPage.total
+      devicesOnline.value = devPage.onlineCount || 0
+      devicesOffline.value = devPage.offlineCount || Math.max((devPage.total || 0) - (devPage.onlineCount || 0), 0)
       devicesPage.value = devPage.page
       devicesPageSize.value = devPage.pageSize
       devicesPages.value = devPage.pages
