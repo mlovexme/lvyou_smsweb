@@ -152,7 +152,11 @@ export const useDevicesStore = defineStore('devices', () => {
     }, 250)
   })
   watch(groupFilter, () => {
+    // FIX(P2#7, Devin Review #8): also reset numbersPage so a group
+    // change while on numbers page >1 doesn't request an out-of-range
+    // page (now that /api/numbers honours the group filter).
     devicesPage.value = 1
+    numbersPage.value = 1
     refresh()
   })
 
