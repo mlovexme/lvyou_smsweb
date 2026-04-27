@@ -40,9 +40,13 @@ export async function fetchDevicesPage({ page = 1, pageSize = 100, q = '', group
   }
 }
 
-export async function fetchNumbersPage({ page = 1, pageSize = 100, q = '' } = {}) {
+export async function fetchNumbersPage({ page = 1, pageSize = 100, q = '', group = '' } = {}) {
   const params = { page, page_size: pageSize }
   if (q) params.q = q
+  // FIX(P2#7, Devin Review #8): pass through the group filter so the
+  // dashboard SIM count stays consistent with the (group-filtered)
+  // device counts. Empty / "all" means no filter.
+  if (group && group !== 'all') params.group = group
   const resp = await api.get('/api/numbers', { params })
   const data = resp.data
   if (Array.isArray(data)) {

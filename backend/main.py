@@ -854,13 +854,20 @@ def listdevices(db: Session) -> List[Dict[str, Any]]:
     return [_device_to_dict(d) for d in devices]
 
 
-def getallnumbers(db: Session) -> List[Dict[str, Any]]:
+def getallnumbers(db: Session, group: str = "") -> List[Dict[str, Any]]:
+    # FIX(P2#7, Devin Review #8): optional group filter so the dashboard
+    # SIM count can stay consistent with the group-filtered device counts.
+    query = db.query(Device)
+    gval = (group or "").strip()
+    if gval and gval != "all":
+        query = query.filter(Device.grp == gval)
     numbers = []
-    for device in db.query(Device).all():
+    for device in query.all():
         for num, op, slot in [(device.sim1number, device.sim1operator, 1), (device.sim2number, device.sim2operator, 2)]:
             if num and num.strip():
                 numbers.append({"deviceId": device.id, "deviceName": device.devId or device.ip,
-                                 "ip": device.ip, "number": num.strip(), "operator": op or "", "slot": slot})
+                                "ip": device.ip, "grp": device.grp or "",
+                                "number": num.strip(), "operator": op or "", "slot": slot})
     return numbers
 
 
@@ -1193,9 +1200,10 @@ def apinumbers(
     page: int = Query(1, ge=1),
     page_size: int = Query(DEVICES_DEFAULT_PAGE_SIZE, ge=1, le=DEVICES_MAX_PAGE_SIZE),
     q: str = Query("", max_length=128),
+    group: str = Query("", max_length=64),
     db: Session = Depends(get_db),
 ):
-    all_nums = getallnumbers(db)
+    all_nums = getallnumbers(db, group=group)
     qval = (q or "").strip().lower()
     if qval:
         all_nums = [

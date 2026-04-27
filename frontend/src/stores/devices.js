@@ -96,7 +96,8 @@ export const useDevicesStore = defineStore('devices', () => {
         fetchNumbersPage({
           page: numbersPage.value,
           pageSize: numbersPageSize.value,
-          q: searchText.value.trim()
+          q: searchText.value.trim(),
+          group: groupFilter.value
         }),
         fetchDeviceGroups()
       ])
