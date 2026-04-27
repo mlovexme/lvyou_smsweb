@@ -16,6 +16,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse, JSONResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, field_validator
+from sqlalchemy import text
 from sqlalchemy.orm import Session
 
 import concurrent.futures
@@ -1205,7 +1206,30 @@ def api_logout(request: Request):
 
 @app.get("/api/health")
 def health():
-    return {"status": "ok", "message": "Board LAN Hub API is running"}
+    # FIX(P2#10): exercise the DB so HEALTHCHECK actually fails when the
+    # SQLite file is missing / corrupt / on a stale volume mount. The
+    # round-trip is two fast queries against `sqlite_master`, so
+    # liveness still costs ~1 ms.
+    db_status = "ok"
+    db_error: Optional[str] = None
+    try:
+        with SessionLocal() as session:
+            session.execute(text("SELECT 1"))
+    except Exception as exc:
+        db_status = "error"
+        db_error = type(exc).__name__
+    payload: Dict[str, Any] = {
+        "status": "ok" if db_status == "ok" else "degraded",
+        "db": db_status,
+        "version": app.version,
+        "message": "Board LAN Hub API is running",
+    }
+    if db_error:
+        payload["db_error"] = db_error
+    return JSONResponse(
+        payload,
+        status_code=200 if db_status == "ok" else 503,
+    )
 
 
 # FIX(P1#7): bound list endpoints. Previously page_size=0 (default) returned
