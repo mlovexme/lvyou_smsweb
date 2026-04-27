@@ -155,7 +155,7 @@ BMUIPASS=请替换为强密码 docker compose up -d
 | `BMUSERREGEXTIMEOUT` | 1.0 | 用户正则替换超时（秒，ReDoS 防御） |
 | `BMLOCALNETSCACHETTL` | 60 | SSRF 本机网段缓存 TTL（秒） |
 | `BMLOGINRATEPERIOD` | 60 | 登录限流窗口（秒，按 IP） |
-| `BMLOGINUSERRATELIMIT` | 5 | 登录限速（次/窗口，按 username） |
+| `BMLOGINUSERRATELIMIT` | 10 | 登录限速（次/窗口，按 username） |
 | `BMLOGINUSERRATEPERIOD` | 600 | 用户名维度限流窗口（秒） |
 | `BMSMSRATEPERIOD` | 60 | 短信限流窗口（秒） |
 | `BMDIALRATEPERIOD` | 60 | 拨号限流窗口（秒） |
@@ -168,9 +168,9 @@ BMUIPASS=请替换为强密码 docker compose up -d
 | `BMAUDITLOGBACKUPCOUNT` | 5 | 审计日志保留份数 |
 | `BMAUDITLOGDISABLE` | 0 | 设为 1 则关闭审计日志（仅诊断用） |
 | `BMMETRICS_TOKEN` | 空 | 设置后启用 `/metrics` 端点；未设置则 endpoint 不注册（默认关闭） |
-| `BMAUTHCOOKIE` | board_mgr_session | 会话 httpOnly cookie 名称 |
+| `BMAUTHCOOKIE` | board_mgr_auth | 会话 httpOnly cookie 名称 |
 | `BMCSRFCOOKIE` | board_mgr_csrf | CSRF 令牌 cookie 名称 |
-| `BMCOOKIESECURE` | 1 | 会话 cookie 仅 HTTPS 回传（本地开发可设 0） |
+| `BMCOOKIESECURE` | 0 | 会话 cookie 仅 HTTPS 回传（生产 HTTPS 部署务必设 1，本地开发保持 0） |
 | `BMCOOKIESAMESITE` | lax | 会话 cookie SameSite 策略（lax / strict / none） |
 | `BMDEBUG` | 0 | 设为 1 启用调试模式（额外日志，生产勿启） |
 
