@@ -23,6 +23,14 @@ export const useDialogStore = defineStore('dialog', () => {
     cancelText = '取消',
     danger = false
   } = {}) {
+    // FIX(Devin Review #7): if a previous confirm dialog is still pending,
+    // resolve it as cancelled before opening a new one. Otherwise the
+    // first caller's `await` would hang forever (orphaned promise) when a
+    // user double-clicks two destructive buttons before the first modal
+    // renders.
+    if (confirmState.value && confirmState.value._resolve) {
+      confirmState.value._resolve(false)
+    }
     return new Promise(resolve => {
       confirmState.value = {
         title, message, confirmText, cancelText, danger,
@@ -45,6 +53,10 @@ export const useDialogStore = defineStore('dialog', () => {
     confirmText = '确定',
     cancelText = '取消'
   } = {}) {
+    // FIX(Devin Review #7): same orphan-promise guard as confirm().
+    if (promptState.value && promptState.value._resolve) {
+      promptState.value._resolve(null)
+    }
     return new Promise(resolve => {
       promptState.value = {
         title, label, defaultValue, placeholder,
