@@ -29,17 +29,21 @@ def test_validate_startup_security_rejects_empty(monkeypatch):
     os.makedirs("/tmp/security-empty-static", exist_ok=True)
     # We can't re-import backend.main cleanly mid-process (it has global
     # singletons) so we test the helper directly via a controlled call.
+    # FIX(P2#4): _validate_startup_security now lives in backend.security
+    # and reads UIPASS from that module's namespace.
     import backend.main as bm
+    import backend.security as bs
 
-    monkeypatch.setattr(bm, "UIPASS", "")
+    monkeypatch.setattr(bs, "UIPASS", "")
     with pytest.raises(RuntimeError, match="BMUIPASS"):
         bm._validate_startup_security()
 
 
 def test_validate_startup_security_rejects_admin(monkeypatch):
     import backend.main as bm
+    import backend.security as bs
 
-    monkeypatch.setattr(bm, "UIPASS", "admin")
+    monkeypatch.setattr(bs, "UIPASS", "admin")
     monkeypatch.delenv("BMINSECURE_DEFAULT_PASSWORD", raising=False)
     with pytest.raises(RuntimeError):
         bm._validate_startup_security()
@@ -47,16 +51,18 @@ def test_validate_startup_security_rejects_admin(monkeypatch):
 
 def test_validate_startup_security_allows_insecure_default_for_dev(monkeypatch):
     import backend.main as bm
+    import backend.security as bs
 
-    monkeypatch.setattr(bm, "UIPASS", "admin")
+    monkeypatch.setattr(bs, "UIPASS", "admin")
     monkeypatch.setenv("BMINSECURE_DEFAULT_PASSWORD", "1")
     bm._validate_startup_security()  # must not raise
 
 
 def test_validate_startup_security_accepts_real_password(monkeypatch):
     import backend.main as bm
+    import backend.security as bs
 
-    monkeypatch.setattr(bm, "UIPASS", "supersecret123")
+    monkeypatch.setattr(bs, "UIPASS", "supersecret123")
     monkeypatch.delenv("BMINSECURE_DEFAULT_PASSWORD", raising=False)
     bm._validate_startup_security()
 
@@ -76,12 +82,18 @@ def test_validate_startup_security_accepts_real_password(monkeypatch):
 def test_is_device_ip_allowed_rejects_non_private(backend, monkeypatch, ip):
     # Force the local-network check to be a no-op (returns []) so layer 2
     # cannot accidentally allow what layer 1 should have refused.
-    monkeypatch.setattr(backend, "_local_ipv4_networks", lambda: [])
+    # FIX(P2#4): the helper lives in backend.security after the split,
+    # patch there so the real implementation sees the empty list.
+    import backend.security as bs
+
+    monkeypatch.setattr(bs, "local_ipv4_networks", lambda: [])
     assert backend._is_device_ip_allowed(ip) is False
 
 
 def test_is_device_ip_allowed_accepts_private_when_no_local_nets(backend, monkeypatch):
-    monkeypatch.setattr(backend, "_local_ipv4_networks", lambda: [])
+    import backend.security as bs
+
+    monkeypatch.setattr(bs, "local_ipv4_networks", lambda: [])
     # When the host has no local nets we conservatively allow private
     # IPs (best-effort). This is documented in the helper docstring.
     assert backend._is_device_ip_allowed("192.168.1.50") is True
@@ -91,7 +103,9 @@ def test_is_device_ip_allowed_accepts_private_when_no_local_nets(backend, monkey
 def test_is_device_ip_allowed_enforces_local_subnet_layer2(backend, monkeypatch):
     from ipaddress import IPv4Network
 
-    monkeypatch.setattr(backend, "_local_ipv4_networks", lambda: [IPv4Network("192.168.1.0/24")])
+    import backend.security as bs
+
+    monkeypatch.setattr(bs, "local_ipv4_networks", lambda: [IPv4Network("192.168.1.0/24")])
     assert backend._is_device_ip_allowed("192.168.1.50") is True
     # Private but not on any local subnet -> blocked by layer 2.
     assert backend._is_device_ip_allowed("10.0.0.5") is False
