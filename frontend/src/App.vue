@@ -1,32 +1,30 @@
 <script setup>
 import { ref, computed, onMounted } from 'vue'
-import { api } from './api/client'
-import { clearStoredAuth, restoreAuth, saveAuth } from './api/auth'
+import { storeToRefs } from 'pinia'
+
 import {
   applyWifiBatch,
-  batchDeleteDevices,
   checkOtaBatch,
-  deleteDeviceById,
-  dialDevice,
-  fetchDashboard,
   fetchDeviceDetail,
-  getScanStatus,
-  healthApi,
-  loginApi,
-  logoutApi,
   previewConfigPreset,
   previewDeviceConfig,
   previewWifiBatch,
   readDeviceConfigs,
   saveDeviceSim,
   sendSms,
-  setDeviceAlias,
-  setDeviceGroup,
-  startScan,
+  dialDevice,
   upgradeOtaBatch,
   writeConfigPreset,
   writeDeviceConfig
 } from './api/endpoints'
+
+import {
+  useAuthStore,
+  useDevicesStore,
+  useNoticeStore,
+  useScanStore
+} from './stores'
+
 import AppHeader from './components/AppHeader.vue'
 import DetailModal from './components/DetailModal.vue'
 import LoginView from './components/LoginView.vue'
@@ -37,17 +35,46 @@ import StatsGrid from './components/StatsGrid.vue'
 import WifiModal from './components/WifiModal.vue'
 import { displayName, prettyTime } from './utils/format'
 
-const uiPass = ref('')
-const authed = ref(false)
-const loading = ref(false)
-const notice = ref({ text: '', type: 'info' })
+// FIX(P2#5): App.vue is now a thin shell. Auth, devices and scan state
+// (the four most reused groups) live in Pinia stores; the component
+// keeps only the bits that are inseparable from the template -- modal
+// open/close flags, the SMS/dial/OTA/WiFi/config workflows, and the
+// thin wrappers below that bridge template events to store actions.
 
-const devices = ref([])
-const numbers = ref([])
+const authStore = useAuthStore()
+const noticeStore = useNoticeStore()
+const devicesStore = useDevicesStore()
+const scanStore = useScanStore()
+
+const { authed, uiPass } = storeToRefs(authStore)
+const { text: noticeText, type: noticeType } = storeToRefs(noticeStore)
+const {
+  devices,
+  numbers,
+  searchText,
+  groupFilter,
+  selectedIds,
+  uniqueGroups,
+  onlineCount,
+  offlineCount,
+  selectedCount,
+  filteredDevices,
+  filteredNumbers
+} = storeToRefs(devicesStore)
+const { scanning } = storeToRefs(scanStore)
+
+// Composite notice payload preserved for child components that expect
+// the legacy `{ text, type }` shape.
+const notice = computed(() => ({ text: noticeText.value, type: noticeType.value }))
+
+// `loading` is the shared "something is in flight" spinner used by every
+// modal and toolbar button. It still lives in App.vue because a handful
+// of unmoved workflows (SMS, dial, OTA, WiFi, config IO, detail/SIM)
+// drive it directly. Store actions toggle their own loading flags;
+// the thin wrappers below mirror them into this ref for the global UI.
+const loading = ref(false)
 
 const activeTab = ref('devices')
-const searchText = ref('')
-const groupFilter = ref('all')
 
 const fromSelected = ref('')
 const toPhone = ref('')
@@ -57,8 +84,6 @@ const commMode = ref('sms')
 const dialPhone = ref('')
 const ttsText = ref('')
 
-const selectedIds = ref([])
-
 const showWifiModal = ref(false)
 const showDetailModal = ref(false)
 const showOtaModal = ref(false)
@@ -67,9 +92,8 @@ const showConfigModal = ref(false)
 const wifiSsid = ref('')
 const wifiPwd = ref('')
 const deviceDetail = ref(null)
-const wifiPreviewResults = ref([]) // WiFi配置预览结果
+const wifiPreviewResults = ref([])
 
-// OTA相关变量
 const otaResults = ref([])
 const otaUpgrading = ref(false)
 
@@ -82,206 +106,100 @@ const configPreviewData = ref([])
 const configExpandedIds = ref([])
 const configMode = ref('regex')
 
-const scanning = ref(false)
-
 function setNotice(text, type = 'info') {
-  notice.value = { text, type }
+  noticeStore.set(text, type)
 }
 
 function clearNotice() {
-  notice.value = { text: '', type: 'info' }
+  noticeStore.clear()
 }
 
-// FIX: 登录页新增 HTTP 429 频率限制错误提示
 async function login() {
-  const password = uiPass.value.trim()
-  if (!password) {
-    setNotice('请输入密码', 'err')
-    return
-  }
   loading.value = true
-  clearNotice()
   try {
-    const data = await loginApi(password)
-    saveAuth(data.token, data.expiresIn || 28800)
-    authed.value = true
-    uiPass.value = ''
-    setNotice('登录成功', 'ok')
-    await refresh()
-  } catch (e) {
-    authed.value = false
-    clearStoredAuth()
-    const status = e && e.response && e.response.status
-    const detail = e && e.response && e.response.data && e.response.data.detail
-    if (status === 429) {
-      setNotice(detail || '登录尝试过于频繁，请稍后再试', 'err')
-    } else if (status === 401) {
-      setNotice('密码错误，请重试', 'err')
-    } else {
-      setNotice(detail || '连接失败，请检查服务是否运行', 'err')
-    }
+    const ok = await authStore.login()
+    if (ok) await devicesStore.refresh()
   } finally {
     loading.value = false
   }
 }
 
 async function logout(showMsg = false) {
-  try {
-    await logoutApi()
-  } catch {
-    // ignore
-  }
-  authed.value = false
-  uiPass.value = ''
-  clearStoredAuth()
-  selectedIds.value = []
-  if (showMsg) {
-    setNotice('已退出登录', 'info')
-  } else {
-    clearNotice()
-  }
+  // authStore.logout() also clears the device selection (see store impl
+  // for the 401-interceptor regression note), so this wrapper is purely
+  // a thin adapter for the LoginView's @logout event.
+  await authStore.logout(showMsg)
 }
-
-api.interceptors.response.use(
-  response => response,
-  async error => {
-    if (error && error.response && error.response.status === 401 && authed.value) {
-      await logout()
-      setNotice('登录已失效，请重新输入密码', 'err')
-    }
-    return Promise.reject(error)
-  }
-)
-
-onMounted(async () => {
-  // FIX(P2#1): restoreAuth() now returns a Promise<boolean> because it
-  // hits /api/me to verify the httpOnly auth cookie -- we no longer have
-  // a token in sessionStorage to inspect synchronously.
-  if (!(await restoreAuth())) return
-  loading.value = true
-  try {
-    await healthApi()
-    authed.value = true
-    await refresh()
-  } catch {
-    await logout()
-    setNotice('登录已过期，请重新登录', 'err')
-  } finally {
-    loading.value = false
-  }
-})
-
-const uniqueGroups = computed(() => {
-  const groupSet = new Set(['all'])
-  devices.value.forEach(device => {
-    if (device.grp) groupSet.add(device.grp)
-  })
-  return Array.from(groupSet)
-})
-
-const onlineCount = computed(() => devices.value.filter(device => device.status === 'online').length)
-const offlineCount = computed(() => devices.value.filter(device => device.status !== 'online').length)
-const selectedCount = computed(() => selectedIds.value.length)
-
-const filteredDevices = computed(() => {
-  return devices.value.filter(device => {
-    const keyword = searchText.value.toLowerCase()
-    const matchSearch = !keyword ||
-      (device.ip || '').toLowerCase().includes(keyword) ||
-      (device.mac || '').toLowerCase().includes(keyword) ||
-      (device.devId || '').toLowerCase().includes(keyword) ||
-      (device.alias || '').toLowerCase().includes(keyword) ||
-      (device.sims && device.sims.sim1 && device.sims.sim1.number || '').includes(keyword) ||
-      (device.sims && device.sims.sim2 && device.sims.sim2.number || '').includes(keyword) ||
-      (device.sims && device.sims.sim1 && device.sims.sim1.operator || '').toLowerCase().includes(keyword) ||
-      (device.sims && device.sims.sim2 && device.sims.sim2.operator || '').toLowerCase().includes(keyword)
-    const matchGroup = groupFilter.value === 'all' || device.grp === groupFilter.value
-    return matchSearch && matchGroup
-  })
-})
-
-const filteredNumbers = computed(() => {
-  return numbers.value.filter(item => {
-    const keyword = searchText.value.toLowerCase()
-    return !keyword ||
-      (item.number || '').includes(keyword) ||
-      (item.operator || '').toLowerCase().includes(keyword) ||
-      (item.deviceName || '').toLowerCase().includes(keyword)
-  })
-})
 
 async function refresh() {
   loading.value = true
   try {
-    const data = await fetchDashboard()
-    devices.value = data.devices
-    numbers.value = data.numbers
-    // FIX(P1#7): warn the operator when the device list was capped by the
-    // server-side pagination window so they aren't silently working with a
-    // partial view.
-    if (data.devicesTotal && data.devicesTotal > data.devices.length) {
-      setNotice(`设备总数 ${data.devicesTotal}，仅显示前 ${data.devices.length} 条；请缩小过滤范围`, 'info')
-    }
-  } catch (e) {
-    if (!(e && e.response && e.response.status === 401)) {
-      setNotice('获取数据失败，请检查网络连接', 'err')
-    }
+    await devicesStore.refresh()
   } finally {
     loading.value = false
   }
 }
 
-function toggleSelectAll() {
-  const isAllSelected = selectedCount.value === filteredDevices.value.length && filteredDevices.value.length > 0
-  selectedIds.value = isAllSelected ? [] : filteredDevices.value.map(device => device.id)
+async function startScanAdd() {
+  await scanStore.start()
 }
 
-async function startScanAdd() {
-  if (scanning.value) return
-  scanning.value = true
-  setNotice('正在提交扫描任务...', 'info')
+onMounted(async () => {
+  loading.value = true
   try {
-    const scanResp = await startScan({})
-    const scanId = scanResp.data && scanResp.data.scanId
-    if (!scanId) {
-      setNotice('扫描任务创建失败', 'err')
-      scanning.value = false
-      return
+    if (await authStore.restore()) {
+      await devicesStore.refresh()
     }
-    setNotice('扫描进行中，请稍候...', 'info')
-    let completed = false
-    for (let i = 0; i < 60; i++) {
-      await new Promise(resolve => setTimeout(resolve, 2000))
-      try {
-        const statusResp = await getScanStatus(scanId)
-        const st = statusResp.data || {}
-        const progress = st.progress || ''
-        if (st.status === 'done') {
-          completed = true
-          setNotice(`扫描完成，发现 ${st.found} 台设备`, st.found ? 'ok' : 'warn')
-          await refresh()
-          break
-        } else if (st.status === 'error') {
-          completed = true
-          setNotice(progress || '扫描出错', 'err')
-          await refresh()
-          break
-        } else if (progress) {
-          setNotice(`扫描中: ${progress}`, 'info')
-        }
-      } catch {
-        // 状态查询失败，继续重试
-      }
-    }
-    if (!completed) {
-      setNotice('扫描超时，设备可能稍后出现，可点一次刷新确认', 'warn')
-      await refresh()
-    }
-  } catch (e) {
-    const detail = e && e.response && e.response.data && e.response.data.detail
-    setNotice(detail || '扫描启动失败，请检查网络连接', 'err')
   } finally {
-    scanning.value = false
+    loading.value = false
+  }
+})
+
+function toggleSelectAll() {
+  devicesStore.toggleSelectAll()
+}
+
+function toggleSelect(id) {
+  devicesStore.toggleSelect(id)
+}
+
+function isSelected(id) {
+  return devicesStore.isSelected(id)
+}
+
+async function renameDevice(device) {
+  const name = prompt('请输入设备别名：', device.alias || '')
+  if (name === null) return
+  await devicesStore.rename(device, name)
+}
+
+async function setGroup(device) {
+  const group = prompt('请输入分组名称：', device.grp || 'auto')
+  if (group === null) return
+  await devicesStore.regroup(device, group)
+}
+
+async function deleteDevice(device) {
+  if (!confirm('确认删除设备 ' + displayName(device) + '？')) return
+  loading.value = true
+  try {
+    await devicesStore.deleteOne(device)
+  } finally {
+    loading.value = false
+  }
+}
+
+async function batchDeleteSelected() {
+  if (!selectedCount.value) {
+    setNotice('请先勾选设备', 'err')
+    return
+  }
+  if (!confirm('确认删除所选 ' + selectedCount.value + ' 台设备？')) return
+  loading.value = true
+  try {
+    await devicesStore.batchDeleteSelected()
+  } finally {
+    loading.value = false
   }
 }
 
@@ -313,19 +231,11 @@ async function send() {
       content: content.value,
       slot: sender.slot
     })
-    setNotice('短信已发送', 'ok')
+    setNotice('已发送', 'ok')
     toPhone.value = ''
     content.value = ''
   } catch (e) {
-    const status = e && e.response && e.response.status
-    const detail = e && e.response && e.response.data && e.response.data.detail
-    if (status === 429) {
-      setNotice(detail || '发送过于频繁，请稍后再试', 'err')
-    } else if (status === 400) {
-      setNotice(detail || '参数错误，请检查手机号和内容', 'err')
-    } else {
-      setNotice(detail || '发送失败，请检查网络和设备状态', 'err')
-    }
+    setNotice((e && e.response && e.response.data && e.response.data.detail) || e.message || '发送失败', 'err')
   } finally {
     loading.value = false
   }
@@ -338,82 +248,25 @@ async function dial() {
   }
   const sender = parseSenderValue()
   if (!sender) {
-    setNotice('请选择有效的发送卡号', 'err')
+    setNotice('请选择有效的拨号卡号', 'err')
     return
   }
   loading.value = true
   try {
     await dialDevice({
       deviceId: sender.deviceId,
-      slot: sender.slot,
       phone: dialPhone.value,
+      slot: sender.slot,
       tts: ttsText.value
     })
-    setNotice('拨号已执行', 'ok')
+    setNotice('已拨出', 'ok')
     dialPhone.value = ''
     ttsText.value = ''
   } catch (e) {
-    const status = e && e.response && e.response.status
-    const detail = e && e.response && e.response.data && e.response.data.detail
-    if (status === 429) {
-      setNotice(detail || '拨号过于频繁，请稍后再试', 'err')
-    } else {
-      setNotice(detail || '拨号失败，请检查网络和设备状态', 'err')
-    }
+    setNotice((e && e.response && e.response.data && e.response.data.detail) || e.message || '拨号失败', 'err')
   } finally {
     loading.value = false
   }
-}
-
-async function renameDevice(device) {
-  const name = prompt('请输入设备别名：', device.alias || '')
-  if (name === null) return
-  try {
-    await setDeviceAlias(device.id, name)
-    setNotice('已更新别名', 'ok')
-    await refresh()
-  } catch (e) {
-    setNotice((e && e.response && e.response.data && e.response.data.detail) || '更新失败', 'err')
-  }
-}
-
-async function setGroup(device) {
-  const group = prompt('请输入分组名称：', device.grp || 'auto')
-  if (group === null) return
-  try {
-    await setDeviceGroup(device.id, group)
-    setNotice('已更新分组', 'ok')
-    await refresh()
-  } catch (e) {
-    setNotice((e && e.response && e.response.data && e.response.data.detail) || '更新失败', 'err')
-  }
-}
-
-async function deleteDevice(device) {
-  if (!confirm('确认删除设备 ' + displayName(device) + '？')) return
-  loading.value = true
-  try {
-    await deleteDeviceById(device.id)
-    setNotice('已删除', 'ok')
-    await refresh()
-  } catch (e) {
-    setNotice((e && e.response && e.response.data && e.response.data.detail) || '删除失败', 'err')
-  } finally {
-    loading.value = false
-  }
-}
-
-function toggleSelect(id) {
-  const idx = selectedIds.value.indexOf(id)
-  if (idx > -1) {
-    selectedIds.value.splice(idx, 1)
-  } else {
-    selectedIds.value.push(id)
-  }
-}
-
-function isSelected(id) {
-  return selectedIds.value.includes(id)
 }
 
 function openWifiModal() {
@@ -428,7 +281,7 @@ function closeWifiModal() {
   showWifiModal.value = false
   wifiSsid.value = ''
   wifiPwd.value = ''
-  wifiPreviewResults.value = [] // 清空预览结果
+  wifiPreviewResults.value = []
 }
 
 function openOtaModal() {
@@ -475,7 +328,7 @@ async function upgradeOta() {
     const okCount = results.filter(r => r.ok).length
     setNotice('OTA升级完成：' + okCount + '/' + results.length, okCount ? 'ok' : 'err')
     closeOtaModal()
-    await refresh()
+    await devicesStore.refresh()
   } catch (e) {
     setNotice((e && e.response && e.response.data && e.response.data.detail) || e.message || '升级失败', 'err')
   } finally {
@@ -674,30 +527,10 @@ async function applyWifi() {
     const list = response.data && response.data.results ? response.data.results : []
     const okCount = list.filter(item => item.ok).length
     setNotice('WiFi 添加完成：' + okCount + '/' + list.length, okCount ? 'ok' : 'err')
-    wifiPreviewResults.value = [] // 清空预览结果
+    wifiPreviewResults.value = []
     closeWifiModal()
   } catch (e) {
     setNotice((e && e.response && e.response.data && e.response.data.detail) || e.message || '配置失败', 'err')
-  } finally {
-    loading.value = false
-  }
-}
-
-async function batchDeleteSelected() {
-  if (!selectedCount.value) {
-    setNotice('请先勾选设备', 'err')
-    return
-  }
-  if (!confirm('确认删除所选 ' + selectedCount.value + ' 台设备？')) return
-  loading.value = true
-  try {
-    const response = await batchDeleteDevices(selectedIds.value)
-    const deleted = response.data && response.data.deleted ? response.data.deleted : 0
-    setNotice('删除完成：' + deleted + '/' + selectedCount.value, deleted ? 'ok' : 'warn')
-    selectedIds.value = []
-    await refresh()
-  } catch (e) {
-    setNotice((e && e.response && e.response.data && e.response.data.detail) || e.message || '删除失败', 'err')
   } finally {
     loading.value = false
   }
@@ -731,7 +564,7 @@ async function saveSimSingle() {
       sim2: deviceDetail.value.device.sim2number || ''
     })
     setNotice('已保存卡号', 'ok')
-    await refresh()
+    await devicesStore.refresh()
   } catch (e) {
     setNotice((e && e.response && e.response.data && e.response.data.detail) || e.message || '保存失败', 'err')
   } finally {
@@ -745,6 +578,7 @@ function updateDetailSim(field, value) {
   }
 }
 </script>
+
 
 <template>
   <div class="app">
