@@ -14,23 +14,62 @@ export function healthApi() {
 }
 
 // FIX(P1#7): /api/devices and /api/numbers now always return a paginated
-// {items, total, page, page_size} envelope. The Array.isArray branches keep
-// the SPA forward-compatible with older bundled backends, but new builds
-// will always hit the object branch.
-export async function fetchDashboard() {
-  const [devicesResp, numbersResp] = await Promise.all([
-    api.get('/api/devices', { params: { page_size: 1000 } }),
-    api.get('/api/numbers', { params: { page_size: 1000 } })
-  ])
-  const devData = devicesResp.data
-  const numData = numbersResp.data
-  const devices = Array.isArray(devData) ? devData : (devData.items || [])
-  const numbers = Array.isArray(numData) ? numData : (numData.items || [])
+// {items, total, page, page_size, pages} envelope. The Array.isArray
+// branches keep the SPA forward-compatible with older bundled backends.
+//
+// FIX(P2#7): real server-side pagination + filter. Callers pass page,
+// pageSize, q, group; the backend (PR #8) applies the same field
+// matching the old client-side filter did and returns just one page.
+export async function fetchDevicesPage({ page = 1, pageSize = 100, q = '', group = '' } = {}) {
+  const params = { page, page_size: pageSize }
+  if (q) params.q = q
+  if (group && group !== 'all') params.group = group
+  const resp = await api.get('/api/devices', { params })
+  const data = resp.data
+  if (Array.isArray(data)) {
+    return { items: data, total: data.length, page: 1, pageSize: data.length, pages: 1 }
+  }
   return {
-    devices,
-    numbers,
-    devicesTotal: Array.isArray(devData) ? devices.length : (devData.total || devices.length),
-    numbersTotal: Array.isArray(numData) ? numbers.length : (numData.total || numbers.length)
+    items: data.items || [],
+    total: data.total || 0,
+    onlineCount: data.online_count || 0,
+    offlineCount: data.offline_count || 0,
+    page: data.page || page,
+    pageSize: data.page_size || pageSize,
+    pages: data.pages || 0
+  }
+}
+
+export async function fetchNumbersPage({ page = 1, pageSize = 100, q = '', group = '' } = {}) {
+  const params = { page, page_size: pageSize }
+  if (q) params.q = q
+  // FIX(P2#7, Devin Review #8): pass through the group filter so the
+  // dashboard SIM count stays consistent with the (group-filtered)
+  // device counts. Empty / "all" means no filter.
+  if (group && group !== 'all') params.group = group
+  const resp = await api.get('/api/numbers', { params })
+  const data = resp.data
+  if (Array.isArray(data)) {
+    return { items: data, total: data.length, page: 1, pageSize: data.length, pages: 1 }
+  }
+  return {
+    items: data.items || [],
+    total: data.total || 0,
+    page: data.page || page,
+    pageSize: data.page_size || pageSize,
+    pages: data.pages || 0
+  }
+}
+
+export async function fetchDeviceGroups() {
+  // /api/devices/groups was added in P2#7 so the dropdown can stay
+  // accurate even when the visible page only shows a subset of devices.
+  // Fall back to an empty list if the backend is older.
+  try {
+    const resp = await api.get('/api/devices/groups')
+    return (resp.data && resp.data.items) || []
+  } catch {
+    return []
   }
 }
 

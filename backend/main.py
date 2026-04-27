@@ -854,13 +854,20 @@ def listdevices(db: Session) -> List[Dict[str, Any]]:
     return [_device_to_dict(d) for d in devices]
 
 
-def getallnumbers(db: Session) -> List[Dict[str, Any]]:
+def getallnumbers(db: Session, group: str = "") -> List[Dict[str, Any]]:
+    # FIX(P2#7, Devin Review #8): optional group filter so the dashboard
+    # SIM count can stay consistent with the group-filtered device counts.
+    query = db.query(Device)
+    gval = (group or "").strip()
+    if gval and gval != "all":
+        query = query.filter(Device.grp == gval)
     numbers = []
-    for device in db.query(Device).all():
+    for device in query.all():
         for num, op, slot in [(device.sim1number, device.sim1operator, 1), (device.sim2number, device.sim2operator, 2)]:
             if num and num.strip():
                 numbers.append({"deviceId": device.id, "deviceName": device.devId or device.ip,
-                                 "ip": device.ip, "number": num.strip(), "operator": op or "", "slot": slot})
+                                "ip": device.ip, "grp": device.grp or "",
+                                "number": num.strip(), "operator": op or "", "slot": slot})
     return numbers
 
 
@@ -1110,31 +1117,101 @@ DEVICES_DEFAULT_PAGE_SIZE = int(os.environ.get("BMDEVICESPAGESIZE", "500"))
 DEVICES_MAX_PAGE_SIZE     = int(os.environ.get("BMDEVICESMAXPAGESIZE", "1000"))
 
 
+# FIX(P2#7): the search and group filters that App.vue used to apply
+# client-side now move into the backend so /api/devices?q=...&group=...
+# can drive real server-side pagination. Without this, true pagination
+# would interact badly with client-side filters: a user could see
+# "0 results" on page 3 of 10 simply because the matching devices fell
+# on other pages.
+def _escape_like(value: str) -> str:
+    # FIX(P2#7, Devin Review #8): SQL LIKE special characters % and _
+    # have to be escaped or a search for an alias like "dev_01" matches
+    # "dev101" / "devX01" too. We pair this with .ilike(..., escape='\\').
+    return value.replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_")
+
+
+def _apply_devices_filter(query, q: str, group: str):
+    qval = (q or "").strip().lower()
+    if qval:
+        # SQLite LIKE is case-insensitive for ASCII by default. Match the
+        # same fields the old client-side filter looked at: ip, mac,
+        # devId, alias, sim1/sim2 numbers and operators.
+        like = f"%{_escape_like(qval)}%"
+        query = query.filter(
+            (Device.ip.ilike(like, escape="\\"))
+            | (Device.mac.ilike(like, escape="\\"))
+            | (Device.devId.ilike(like, escape="\\"))
+            | (Device.alias.ilike(like, escape="\\"))
+            | (Device.sim1number.ilike(like, escape="\\"))
+            | (Device.sim2number.ilike(like, escape="\\"))
+            | (Device.sim1operator.ilike(like, escape="\\"))
+            | (Device.sim2operator.ilike(like, escape="\\"))
+        )
+    gval = (group or "").strip()
+    if gval and gval != "all":
+        query = query.filter(Device.grp == gval)
+    return query
+
+
 @app.get("/api/devices")
 def apidevices(
     page: int = Query(1, ge=1),
     page_size: int = Query(DEVICES_DEFAULT_PAGE_SIZE, ge=1, le=DEVICES_MAX_PAGE_SIZE),
+    q: str = Query("", max_length=128),
+    group: str = Query("", max_length=64),
     db: Session = Depends(get_db),
 ):
     query = db.query(Device).order_by(Device.created.desc(), Device.id.desc())
+    query = _apply_devices_filter(query, q, group)
     total = query.count()
+    # FIX(P2#7, Devin Review #8): online/offline counts must be computed
+    # against the full filtered set, not just the visible page, so the
+    # dashboard header (online + offline = total) doesn't drift once
+    # there are multiple pages.
+    online = query.filter(Device.status == "online").count()
     items = query.offset((page - 1) * page_size).limit(page_size).all()
     return {
-        "items":     [_device_to_dict(d) for d in items],
-        "total":     total,
-        "page":      page,
-        "page_size": page_size,
-        "pages":     (total + page_size - 1) // page_size if total else 0,
+        "items":         [_device_to_dict(d) for d in items],
+        "total":         total,
+        "online_count":  online,
+        "offline_count": max(total - online, 0),
+        "page":          page,
+        "page_size":     page_size,
+        "pages":         (total + page_size - 1) // page_size if total else 0,
     }
+
+
+@app.get("/api/devices/groups")
+def apidevicesgroups(db: Session = Depends(get_db)):
+    """Return the distinct, non-empty group names so the dashboard can
+    populate the group dropdown without paging through every device."""
+    rows = (
+        db.query(Device.grp)
+        .filter(Device.grp.isnot(None), Device.grp != "")
+        .distinct()
+        .all()
+    )
+    groups = sorted({row[0] for row in rows if row[0]})
+    return {"items": groups}
 
 
 @app.get("/api/numbers")
 def apinumbers(
     page: int = Query(1, ge=1),
     page_size: int = Query(DEVICES_DEFAULT_PAGE_SIZE, ge=1, le=DEVICES_MAX_PAGE_SIZE),
+    q: str = Query("", max_length=128),
+    group: str = Query("", max_length=64),
     db: Session = Depends(get_db),
 ):
-    all_nums = getallnumbers(db)
+    all_nums = getallnumbers(db, group=group)
+    qval = (q or "").strip().lower()
+    if qval:
+        all_nums = [
+            n for n in all_nums
+            if qval in (n.get("number") or "").lower()
+            or qval in (n.get("operator") or "").lower()
+            or qval in (n.get("deviceName") or "").lower()
+        ]
     total = len(all_nums)
     start = (page - 1) * page_size
     return {
