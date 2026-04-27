@@ -560,6 +560,10 @@ def _configure_cors(_app: FastAPI) -> None:
 
 # FIX(P0#1): expose /api/health so container/compose HEALTHCHECK works without
 # needing a Bearer token. The endpoint returns only liveness info.
+# FIX(P2#8): /metrics is added to this set inside _wire_prometheus()
+# only when BMMETRICS_TOKEN is set. Leaving it out when metrics are
+# disabled means the main token_auth_mw still rejects requests instead
+# of letting them fall through to a confusing 404.
 _PUBLIC_PATHS = {"/", "/api/login", "/api/health"}
 
 # FIX(P2#1): methods that mutate state and therefore must carry a valid
@@ -600,6 +604,97 @@ async def token_auth_mw(request: Request, call_next):
 # still carry Access-Control-Allow-* headers (otherwise the browser hides
 # them as a generic network error and the SPA cannot prompt for re-login).
 _configure_cors(app)
+
+
+# FIX(P2#8): Prometheus instrumentation. The default instrumentator
+# emits per-request HTTP histogram + counter under
+# `http_request_duration_seconds` / `http_requests_total`. We add three
+# custom gauges that are cheap to keep up to date:
+#   - bm_devices_total   (refreshed lazily inside /metrics)
+#   - bm_devices_online  (same)
+#   - bm_login_failures  (incremented in the login endpoint via
+#                         _bm_login_failures.labels(reason=...).inc())
+# /metrics is still routed through the auth middleware bypass list, but
+# we additionally require a bearer token (BMMETRICS_TOKEN). If the env
+# var is not set, /metrics is *not registered at all* -- safer default
+# than "everyone on the LAN can scrape device counts".
+def _wire_prometheus(_app: FastAPI) -> None:
+    metrics_token = os.environ.get("BMMETRICS_TOKEN", "").strip()
+    if not metrics_token:
+        return  # opt-in only; absent env var = no /metrics endpoint
+    _PUBLIC_PATHS.add("/metrics")
+
+    try:
+        from prometheus_client import Counter, Gauge
+        from prometheus_fastapi_instrumentator import Instrumentator
+    except ImportError:
+        # The dependency is in requirements.txt but in the unlikely case
+        # an operator strips it from a custom build, fail loudly during
+        # setup rather than mysteriously at scrape time.
+        raise RuntimeError(
+            "BMMETRICS_TOKEN is set but prometheus_fastapi_instrumentator "
+            "is not installed. Install backend/requirements.txt or unset "
+            "BMMETRICS_TOKEN."
+        )
+
+    _app.state.bm_devices_total = Gauge("bm_devices_total", "Total devices currently registered")
+    _app.state.bm_devices_online = Gauge("bm_devices_online", "Devices currently marked online")
+    _app.state.bm_login_failures = Counter(
+        "bm_login_failures_total",
+        "Failed login attempts grouped by reason",
+        ["reason"],
+    )
+
+    instrumentator = Instrumentator(
+        should_group_status_codes=True,
+        should_ignore_untemplated=True,
+        excluded_handlers=["/metrics", "/api/health"],
+    )
+    instrumentator.instrument(_app)
+
+    # Refresh the device gauges on every scrape via a tiny middleware on
+    # the metrics route itself. Cheap (two .count() queries) and avoids
+    # having to hook every place that mutates a device.
+    def _refresh_device_gauges() -> None:
+        try:
+            with SessionLocal() as session:
+                total = session.query(Device).count()
+                online = session.query(Device).filter(Device.status == "online").count()
+            _app.state.bm_devices_total.set(total)
+            _app.state.bm_devices_online.set(online)
+        except Exception:
+            # Don't let a slow / locked DB block scraping.
+            pass
+
+    @_app.middleware("http")
+    async def _metrics_auth_mw(request: Request, call_next):
+        if request.url.path == "/metrics":
+            auth = request.headers.get("authorization", "")
+            if not auth.startswith("Bearer "):
+                return _unauthorized_json("metrics token required")
+            supplied = auth[len("Bearer "):].strip()
+            import hmac as _hmac
+            if not _hmac.compare_digest(supplied, metrics_token):
+                return _unauthorized_json("metrics token invalid")
+            _refresh_device_gauges()
+        return await call_next(request)
+
+    # Expose at /metrics. Must be called after instrument() above.
+    instrumentator.expose(_app, endpoint="/metrics", include_in_schema=False)
+
+
+_wire_prometheus(app)
+
+
+def _bm_login_failure(reason: str) -> None:
+    """Increment the login-failure counter when /metrics is enabled.
+    No-op when BMMETRICS_TOKEN is unset (the counter wasn't created)."""
+    counter = getattr(app.state, "bm_login_failures", None)
+    if counter is not None:
+        try:
+            counter.labels(reason=reason).inc()
+        except Exception:
+            pass
 
 
 os.makedirs(STATICDIR, exist_ok=True)
@@ -1038,9 +1133,13 @@ def api_login(req: LoginReq, request: Request):
         # auditors can spot bruteforce activity without correlating raw
         # uvicorn logs.
         _audit("login_blocked", user=username or "-", ip=client_ip, result="ratelimit_ip")
+        # FIX(P2#8): record rate-limited rejections separately from bad
+        # credentials so a bursty attack is visible on the dashboard.
+        _bm_login_failure("rate_limited_ip")
         raise HTTPException(status_code=429, detail="登录尝试过于频繁，请稍后再试")
     if user_key and not _login_limiter_user.check_only(user_key):
         _audit("login_blocked", user=username, ip=client_ip, result="ratelimit_user")
+        _bm_login_failure("rate_limited_user")
         raise HTTPException(status_code=429, detail="该账号登录尝试过于频繁，请稍后再试")
     if not _check_login_credentials(username, req.password or ""):
         # FIX(P2#2): record the failure on both axes so a single mistake
@@ -1052,6 +1151,7 @@ def api_login(req: LoginReq, request: Request):
         # FIX(P2#3): record failed credentials -- previously only successful
         # logins were audited which made post-incident investigation hard.
         _audit("login_fail", user=username or "-", ip=client_ip, result="bad_credentials")
+        _bm_login_failure("bad_credentials")
         raise HTTPException(status_code=401, detail="用户名或密码错误")
     # FIX(P2#2): clear the per-user window on successful auth so honest
     # typo cycles do not accumulate over the day. The IP window is left
