@@ -78,7 +78,18 @@ from backend.security import (
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(name)s: %(message)s")
 logger = logging.getLogger("board-manager")
-logger.setLevel(logging.DEBUG if os.environ.get("BMDEBUG") else logging.INFO)
+
+
+def _env_truthy(name: str) -> bool:
+    """FIX(P2#12): forward-declared so the BMDEBUG check below treats
+    BMDEBUG=0 as false. Previously the bare ``os.environ.get("BMDEBUG")``
+    truthiness test enabled debug logging when an operator wrote
+    ``BMDEBUG=0`` (a non-empty string is truthy in Python). The same
+    helper is reused later for BMINSECURE_DEFAULT_PASSWORD and friends."""
+    return os.environ.get(name, "").strip().lower() in {"1", "true", "yes", "on"}
+
+
+logger.setLevel(logging.DEBUG if _env_truthy("BMDEBUG") else logging.INFO)
 
 # Constants, engine, and ORM models now live in backend.config / backend.db
 # and are re-imported above. The names are unchanged so the rest of this

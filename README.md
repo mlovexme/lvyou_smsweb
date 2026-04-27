@@ -149,6 +149,32 @@ BMUIPASS=请替换为强密码 docker compose up -d
 | `BMCONFIGBATCHMAX` | 64 | 批量配置设备数上限 |
 | `BMPREWARMCONCURRENCY` | 64 | 扫描阶段并发 ping 上限 |
 | `BMTRUSTEDPROXYHOPS` | 0 | 信任的反代层数（≥1时用X-Forwarded-For） |
+| `BMTOKENTTL` | 7200 | 登录会话过期时间（秒，默认 2 小时） |
+| `BMDEVICESPAGESIZE` | 500 | `/api/devices` 默认分页大小 |
+| `BMDEVICESMAXPAGESIZE` | 1000 | `/api/devices` `page_size` 上限（防一次拉全表） |
+| `BMUSERREGEXTIMEOUT` | 1.0 | 用户正则替换超时（秒，ReDoS 防御） |
+| `BMLOCALNETSCACHETTL` | 60 | SSRF 本机网段缓存 TTL（秒） |
+| `BMLOGINRATEPERIOD` | 60 | 登录限流窗口（秒，按 IP） |
+| `BMLOGINUSERRATELIMIT` | 10 | 登录限速（次/窗口，按 username） |
+| `BMLOGINUSERRATEPERIOD` | 600 | 用户名维度限流窗口（秒） |
+| `BMSMSRATEPERIOD` | 60 | 短信限流窗口（秒） |
+| `BMDIALRATEPERIOD` | 60 | 拨号限流窗口（秒） |
+| `BMTCPTIMEOUT` | — | TCP 端口探测超时（秒） |
+| `BMCIDRFALLBACKLIMIT` | — | CIDR 推断回退路径每秒最多调用次数 |
+| `BMCONFIGMAXCHARS` | — | 写配置接口正文长度上限 |
+| `BMSCANRETRYSLEEPMS` | — | 扫描失败重试间隔（毫秒） |
+| `BMAUDITLOGFILE` | 空 | 审计日志落盘路径（空则只走 logging）；按大小轮转，默认 10MB×5 |
+| `BMAUDITLOGMAXBYTES` | 10485760 | 审计日志单文件最大字节数（轮转阈值） |
+| `BMAUDITLOGBACKUPCOUNT` | 5 | 审计日志保留份数 |
+| `BMAUDITLOGDISABLE` | 0 | 设为 1 则关闭审计日志（仅诊断用） |
+| `BMMETRICS_TOKEN` | 空 | 设置后启用 `/metrics` 端点；未设置则 endpoint 不注册（默认关闭） |
+| `BMAUTHCOOKIE` | board_mgr_auth | 会话 httpOnly cookie 名称 |
+| `BMCSRFCOOKIE` | board_mgr_csrf | CSRF 令牌 cookie 名称 |
+| `BMCOOKIESECURE` | 0 | 会话 cookie 仅 HTTPS 回传（生产 HTTPS 部署务必设 1，本地开发保持 0） |
+| `BMCOOKIESAMESITE` | lax | 会话 cookie SameSite 策略（lax / strict / none） |
+| `BMDEBUG` | 0 | 设为 1 启用调试模式（额外日志，生产勿启） |
+
+> 注：上表中标记 `—` 的项默认值随版本调整，请以 `backend/main.py` 中的 `os.environ.get(...)` 为准。多数 P2#1+ 引入的变量在对应 PR 合并后才生效。
 
 #### 本地构建镜像
 
