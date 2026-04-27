@@ -21,16 +21,19 @@ import {
 import {
   useAuthStore,
   useDevicesStore,
+  useDialogStore,
   useNoticeStore,
   useScanStore
 } from './stores'
 
 import AppHeader from './components/AppHeader.vue'
+import ConfirmModal from './components/ConfirmModal.vue'
 import DetailModal from './components/DetailModal.vue'
 import LoginView from './components/LoginView.vue'
 import NoticeBar from './components/NoticeBar.vue'
 import OtaModal from './components/OtaModal.vue'
 import MessagePanel from './components/MessagePanel.vue'
+import PromptModal from './components/PromptModal.vue'
 import StatsGrid from './components/StatsGrid.vue'
 import WifiModal from './components/WifiModal.vue'
 import { displayName, prettyTime } from './utils/format'
@@ -45,6 +48,7 @@ const authStore = useAuthStore()
 const noticeStore = useNoticeStore()
 const devicesStore = useDevicesStore()
 const scanStore = useScanStore()
+const dialogStore = useDialogStore()
 
 const { authed, uiPass } = storeToRefs(authStore)
 const { text: noticeText, type: noticeType } = storeToRefs(noticeStore)
@@ -168,19 +172,35 @@ function isSelected(id) {
 }
 
 async function renameDevice(device) {
-  const name = prompt('请输入设备别名：', device.alias || '')
+  const name = await dialogStore.prompt({
+    title: '修改设备别名',
+    label: '请输入设备别名：',
+    defaultValue: device.alias || '',
+    placeholder: '别名'
+  })
   if (name === null) return
   await devicesStore.rename(device, name)
 }
 
 async function setGroup(device) {
-  const group = prompt('请输入分组名称：', device.grp || 'auto')
+  const group = await dialogStore.prompt({
+    title: '修改设备分组',
+    label: '请输入分组名称：',
+    defaultValue: device.grp || 'auto',
+    placeholder: '分组'
+  })
   if (group === null) return
   await devicesStore.regroup(device, group)
 }
 
 async function deleteDevice(device) {
-  if (!confirm('确认删除设备 ' + displayName(device) + '？')) return
+  const ok = await dialogStore.confirm({
+    title: '删除设备',
+    message: `确认删除设备 ${displayName(device)}？`,
+    confirmText: '删除',
+    danger: true
+  })
+  if (!ok) return
   loading.value = true
   try {
     await devicesStore.deleteOne(device)
@@ -194,7 +214,13 @@ async function batchDeleteSelected() {
     setNotice('请先勾选设备', 'err')
     return
   }
-  if (!confirm('确认删除所选 ' + selectedCount.value + ' 台设备？')) return
+  const ok = await dialogStore.confirm({
+    title: '批量删除',
+    message: `确认删除所选 ${selectedCount.value} 台设备？`,
+    confirmText: '删除',
+    danger: true
+  })
+  if (!ok) return
   loading.value = true
   try {
     await devicesStore.batchDeleteSelected()
@@ -317,9 +343,13 @@ async function upgradeOta() {
     setNotice('没有可升级的设备', 'warn')
     return
   }
-  if (!confirm(`确定要升级 ${hasUpdateDevices.length} 台设备吗？设备会重启。`)) {
-    return
-  }
+  const ok = await dialogStore.confirm({
+    title: '确认 OTA 升级',
+    message: `确定要升级 ${hasUpdateDevices.length} 台设备吗？设备会重启。`,
+    confirmText: '升级',
+    danger: true
+  })
+  if (!ok) return
   otaUpgrading.value = true
   loading.value = true
   try {
@@ -440,7 +470,13 @@ async function writeConfigs() {
     return
   }
   const modeText = configMode.value === 'clean_message_templates' ? '应用简洁消息模板' : '按正则替换'
-  if (!confirm(`确认对 ${changedCount} 台设备写入配置？\n本次操作：${modeText}。\n会先重新读取每台设备当前配置，写入后再读回校验。`)) return
+  const ok = await dialogStore.confirm({
+    title: '确认写入配置',
+    message: `确认对 ${changedCount} 台设备写入配置？\n本次操作：${modeText}。\n会先重新读取每台设备当前配置，写入后再读回校验。`,
+    confirmText: '写入',
+    danger: true
+  })
+  if (!ok) return
   loading.value = true
   try {
     const payload = { device_ids: selectedIds.value }
@@ -870,6 +906,13 @@ function updateDetailSim(field, value) {
         @close="closeDetailModal"
       />
     </div>
+
+    <!-- FIX(P2#6): app-wide singletons that replace native window.prompt
+         and window.confirm. Only ever one of each open at a time, so
+         mounting them at the App root keeps the dialog store usable
+         from anywhere (LoginView too, when authed === false). -->
+    <ConfirmModal />
+    <PromptModal />
   </div>
 </template>
 
