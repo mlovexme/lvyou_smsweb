@@ -58,3 +58,4 @@ data.db
 
 # Build leftovers
 frontend/.vite/
+chatbot/data/
