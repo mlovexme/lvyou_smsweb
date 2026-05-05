@@ -122,6 +122,7 @@ class ChatResponse(BaseModel):
     model: str
     choices: List[_Choice]
     usage: _Usage
+    conversation_id: Optional[str] = None
 
 
 class ModelEntry(BaseModel):
@@ -385,6 +386,7 @@ async def chat_completions(
                 completion_tokens=len(full_text),
                 total_tokens=len(user_text) + len(full_text),
             ),
+            conversation_id=conversation_id,
         )
 
 
