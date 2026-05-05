@@ -75,6 +75,7 @@ from backend.security import (
     tcp_port_open as _tcp_port_open,
     validate_startup_security as _validate_startup_security,
 )
+from backend.trae_openai import router as _trae_router
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(name)s: %(message)s")
 logger = logging.getLogger("board-manager")
@@ -577,6 +578,9 @@ def _configure_cors(_app: FastAPI) -> None:
 # disabled means the main token_auth_mw still rejects requests instead
 # of letting them fall through to a confusing 404.
 _PUBLIC_PATHS = {"/", "/api/login", "/api/health"}
+# Trae OpenAI-compatible routes carry their own token (x-ide-token /
+# Authorization: Bearer …) and must bypass the board-manager cookie auth.
+_TRAE_PATH_PREFIXES = ("/v1/chat/", "/v1/models", "/v1/conversations/", "/v1/trae/")
 
 # FIX(P2#1): methods that mutate state and therefore must carry a valid
 # X-CSRF-Token header when the caller authenticated via a cookie. Bearer-
@@ -588,7 +592,7 @@ _CSRF_REQUIRED_METHODS = {"POST", "PUT", "PATCH", "DELETE"}
 @app.middleware("http")
 async def token_auth_mw(request: Request, call_next):
     path = request.url.path
-    if request.method == "OPTIONS" or path.startswith("/static/") or path in _PUBLIC_PATHS:
+    if request.method == "OPTIONS" or path.startswith("/static/") or path in _PUBLIC_PATHS or path.startswith(_TRAE_PATH_PREFIXES):
         return await call_next(request)
     token, via_cookie = _extract_request_token(request)
     if not token:
@@ -617,6 +621,8 @@ async def token_auth_mw(request: Request, call_next):
 # them as a generic network error and the SPA cannot prompt for re-login).
 _configure_cors(app)
 
+# Trae OpenAI-compatible API (reverse-engineered adapter)
+app.include_router(_trae_router)
 
 # FIX(P2#8): Prometheus instrumentation. The default instrumentator
 # emits per-request HTTP histogram + counter under

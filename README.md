@@ -173,6 +173,11 @@ BMUIPASS=请替换为强密码 docker compose up -d
 | `BMCOOKIESECURE` | 0 | 会话 cookie 仅 HTTPS 回传（生产 HTTPS 部署务必设 1，本地开发保持 0） |
 | `BMCOOKIESAMESITE` | lax | 会话 cookie SameSite 策略（lax / strict / none） |
 | `BMDEBUG` | 0 | 设为 1 启用调试模式（额外日志，生产勿启） |
+| `TRAE_BASE_URL` | `https://trae-api-cn.mchost.guru` | Trae API 网关地址 |
+| `TRAE_TOKEN` | 空 | Trae 客户端 JWT（`x-ide-token`），用于 OpenAI 兼容接口的默认认证 |
+| `TRAE_APP_ID` | `6eefa01c-…` | Trae X-App-Id 请求头 |
+| `TRAE_AGENT_TYPE` | `solo_work_remote` | 默认 agent 类型 |
+| `TRAE_TIMEOUT` | 120 | Trae API 请求超时（秒） |
 
 > 注：上表中标记 `—` 的项默认值随版本调整，请以 `backend/main.py` 中的 `os.environ.get(...)` 为准。多数 P2#1+ 引入的变量在对应 PR 合并后才生效。
 
@@ -347,6 +352,48 @@ v5.0 是一次重大安全与性能升级，包含 20+ 项修复和优化。
 | `BMCONFIGBATCHMAX` | 64 | 批量配置上限 |
 | `BMPREWARMCONCURRENCY` | 64 | 扫描并发 ping 上限 |
 | `BMTRUSTEDPROXYHOPS` | 0 | 信任代理层数 |
+
+## Trae OpenAI 兼容接口
+
+逆向 Trae Android 客户端的 API 调用，封装为标准 OpenAI 兼容接口，可直接对接任何支持 OpenAI API 的工具（如 ChatGPT-Next-Web、LobeChat、OpenCat 等）。
+
+### 端点
+
+| 方法 | 路径 | 说明 |
+|------|------|------|
+| GET | `/v1/models` | 列出可用模型 |
+| POST | `/v1/chat/completions` | 聊天补全（支持流式/非流式） |
+| POST | `/v1/conversations/{id}/messages` | 向已有对话追加消息 |
+| GET | `/v1/trae/health` | Trae 网关连通性检查 |
+
+### 使用方式
+
+1. 从 Trae 客户端（Android / Desktop）抓包获取 `x-ide-token` JWT。
+2. 设置环境变量 `TRAE_TOKEN=<jwt>` 或在请求中携带 `Authorization: Bearer <jwt>`。
+3. 按 OpenAI 格式调用：
+
+```bash
+curl http://localhost:8000/v1/chat/completions \
+  -H "Content-Type: application/json" \
+  -H "Authorization: Bearer <your-trae-jwt>" \
+  -d '{
+    "model": "trae-auto",
+    "messages": [{"role": "user", "content": "你好"}],
+    "stream": true
+  }'
+```
+
+### 可用模型
+
+| model 参数 | 说明 |
+|-----------|------|
+| `trae` / `trae-auto` | 自动选择（Trae 默认策略） |
+| `deepseek` | DeepSeek |
+| `doubao` | 豆包 |
+| `claude-3.5-sonnet` | Claude 3.5 Sonnet |
+| `gpt-4o` | GPT-4o |
+
+> 直接传入其他模型名也会原样转发给 Trae 后端，可自行探索更多模型。
 
 ## 技术栈
 
