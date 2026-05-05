@@ -344,7 +344,11 @@ async def chat_completions(
     if not user_text:
         raise HTTPException(status_code=400, detail="No message content")
 
-    async with httpx.AsyncClient(timeout=TRAE_TIMEOUT) as client:
+    # Create the client manually so its lifetime can extend beyond this
+    # function for the streaming path (the generator consumes the SSE
+    # stream lazily, long after this coroutine returns).
+    client = httpx.AsyncClient(timeout=TRAE_TIMEOUT)
+    try:
         # 1. Create a task (and implicitly a conversation if needed).
         task_data = await _create_task(
             client, token, body.conversation_id, user_text, model_name,
@@ -358,6 +362,8 @@ async def chat_completions(
         message_id = task_data.get("message_id", uuid.uuid4().hex)
 
         if body.stream:
+            # _sse_response takes ownership of `client` and closes it
+            # in its generator's finally block.
             return _sse_response(
                 client, token, task_id, body.model, message_id,
             )
@@ -388,6 +394,14 @@ async def chat_completions(
             ),
             conversation_id=conversation_id,
         )
+    except Exception:
+        await client.aclose()
+        raise
+    finally:
+        # For the non-streaming path, close the client here.
+        # For streaming, _sse_response owns the client lifetime.
+        if not body.stream:
+            await client.aclose()
 
 
 def _sse_response(
@@ -397,22 +411,28 @@ def _sse_response(
     model: str,
     message_id: str,
 ) -> StreamingResponse:
-    """Wrap the Trae SSE stream as an OpenAI-format SSE response."""
+    """Wrap the Trae SSE stream as an OpenAI-format SSE response.
+
+    Takes ownership of *client* and closes it when the generator finishes.
+    """
 
     async def _generate() -> AsyncIterator[str]:
-        async for chunk in _stream_events(client, token, task_id):
-            data = {
-                "id": f"chatcmpl-{message_id}",
-                "object": "chat.completion.chunk",
-                "created": int(time.time()),
-                "model": model,
-                "choices": [
-                    {"index": 0, "delta": {"content": chunk}, "finish_reason": None}
-                ],
-            }
-            yield f"data: {json.dumps(data, ensure_ascii=False)}\n\n"
-        # Final [DONE] sentinel
-        yield "data: [DONE]\n\n"
+        try:
+            async for chunk in _stream_events(client, token, task_id):
+                data = {
+                    "id": f"chatcmpl-{message_id}",
+                    "object": "chat.completion.chunk",
+                    "created": int(time.time()),
+                    "model": model,
+                    "choices": [
+                        {"index": 0, "delta": {"content": chunk}, "finish_reason": None}
+                    ],
+                }
+                yield f"data: {json.dumps(data, ensure_ascii=False)}\n\n"
+            # Final [DONE] sentinel
+            yield "data: [DONE]\n\n"
+        finally:
+            await client.aclose()
 
     return StreamingResponse(
         _generate(),
